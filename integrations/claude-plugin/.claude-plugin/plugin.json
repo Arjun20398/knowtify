@@ -1,0 +1,5 @@
+{
+  "name": "knowtify",
+  "version": "0.1.0",
+  "description": "Route Claude permission prompts to Knowtify desktop notifications with full context and action buttons"
+}

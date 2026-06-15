@@ -1,0 +1,24 @@
+{
+  "name": "knowtify",
+  "version": "0.1.0",
+  "description": "Universal AI input notifier — one notification when any coding agent needs your input",
+  "type": "module",
+  "bin": {
+    "knowtify": "./bin/knowtify.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build:notifier": "bash notifier-native/macos/build.sh",
+    "postinstall": "bash notifier-native/macos/build.sh 2>/dev/null || true"
+  },
+  "keywords": [
+    "claude",
+    "cursor",
+    "copilot",
+    "notifications",
+    "ai-agent"
+  ],
+  "license": "MIT"
+}

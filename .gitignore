@@ -1,0 +1,5 @@
+node_modules/
+.knowtify-notify
+notifier-native/macos/knowtify-notify
+notifier-native/macos/KnowtifyNotify.app/Contents/MacOS/knowtify-notify
+.DS_Store
