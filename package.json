@@ -9,14 +9,9 @@
   "engines": {
     "node": ">=18"
   },
-  "scripts": {
-    "build:notifier": "bash notifier-native/macos/build.sh",
-    "postinstall": "bash notifier-native/macos/build.sh 2>/dev/null || true"
-  },
+  "scripts": {},
   "keywords": [
     "claude",
-    "cursor",
-    "copilot",
     "notifications",
     "ai-agent"
   ],

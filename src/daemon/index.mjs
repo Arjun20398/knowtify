@@ -2,14 +2,13 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { loadConfig, saveDefaultConfig } from '../config.mjs'
+const KNOWTIFY_BIN = fileURLToPath(new URL('../../bin/knowtify.mjs', import.meta.url))
 import { aggregate, getActivePrompts, loadState, markNotified, saveState } from './aggregator.mjs'
 import { getProviders, readPushEvents, scanAll } from '../providers/index.mjs'
 import { dispatchResponse, respondById } from '../responders/index.mjs'
 import { sendNotification } from '../notifier/index.mjs'
 import { ensureDirs, PID_PATH, PENDING_DIR } from '../paths.mjs'
 import { info, error, debug } from '../logger.mjs'
-
-const KNOWTIFY_BIN = fileURLToPath(new URL('../../bin/knowtify.mjs', import.meta.url))
 
 /** @type {NodeJS.Timeout | null} */
 let pollTimer = null
@@ -41,7 +40,7 @@ export async function runScan() {
       markNotified(state, prompt.id)
       continue
     }
-    sendNotification(prompt, KNOWTIFY_BIN)
+    sendNotification(prompt)
     markNotified(state, prompt.id)
     info('notified', { id: prompt.id, tool: prompt.tool, project: prompt.project })
   }

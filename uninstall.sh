@@ -16,14 +16,15 @@ echo "──────────────────────"
 step "Removing PermissionRequest hook from $SETTINGS"
 
 if [[ -f "$SETTINGS" ]]; then
-  node - "$SETTINGS" "$INSTALL_DIR" <<'EOF'
+  node - "$SETTINGS" <<'EOF'
 import fs from 'fs'
-const [,,settingsPath, installDir] = process.argv
+const [,,settingsPath] = process.argv
 const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
 if (settings.hooks?.PermissionRequest) {
+  const MARKER = 'knowtify'
   settings.hooks.PermissionRequest = settings.hooks.PermissionRequest.filter(entry =>
     !Array.isArray(entry.hooks) ||
-    !entry.hooks.some(h => h.command?.includes(installDir))
+    !entry.hooks.some(h => h.command?.includes(MARKER))
   )
   if (settings.hooks.PermissionRequest.length === 0) {
     delete settings.hooks.PermissionRequest
@@ -38,7 +39,15 @@ else
   echo "  settings.json not found, skipping"
 fi
 
-# ── 2. Remove install directory ──────────────────────────
+# ── 2. Remove KnowtifyNotify.app from macOS Notifications ─
+step "Cleaning up macOS notification registry"
+
+# Remove any leftover TCC entry for the old Swift notifier
+tccutil reset Notifications com.knowtify.notify 2>/dev/null \
+  && echo "  Notification entry cleared ✓" \
+  || echo "  No notification entry found (already clean)"
+
+# ── 3. Remove install directory ──────────────────────────
 step "Removing $INSTALL_DIR"
 
 if [[ -d "$INSTALL_DIR" ]]; then

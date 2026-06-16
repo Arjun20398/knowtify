@@ -13,12 +13,6 @@ export const PENDING_DIR = path.join(ROOT, 'pending')
 export const LOGS_DIR = path.join(ROOT, 'logs')
 export const LOG_PATH = path.join(LOGS_DIR, 'knowtify.log')
 
-const PKG_ROOT = path.resolve(import.meta.dirname, '..')
-export const NOTIFIER_BIN = path.join(
-  PKG_ROOT,
-  'notifier-native/macos/KnowtifyNotify.app/Contents/MacOS/knowtify-notify'
-)
-
 export function ensureDirs() {
   for (const dir of [ROOT, EVENTS_DIR, RESPONSES_DIR, PENDING_DIR, LOGS_DIR]) {
     fs.mkdirSync(dir, { recursive: true })

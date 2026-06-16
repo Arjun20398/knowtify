@@ -144,8 +144,62 @@ export function buildHookOutput(prompt, action) {
 }
 
 // ──────────────────────────────────────────────────────────
+// Focus detection
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Returns true if the app hosting Claude is currently the frontmost window.
+ * Strategy: walk up this process's parent chain to find the GUI app bundle,
+ * then compare against the current frontmost app.
+ * If they match, the user is already watching Claude — no dialog needed.
+ */
+function isClaudeAppFrontmost() {
+  try {
+    // Get frontmost app path — no System Events, no permission prompt
+    const frontResult = spawnSync('/usr/bin/osascript', [
+      '-e', 'path to frontmost application as text',
+    ], { encoding: 'utf8', timeout: 3000 })
+
+    if (frontResult.status !== 0) return false
+
+    // Extract app name from path like "Macintosh HD:Applications:iTerm.app:"
+    const frontPath = (frontResult.stdout || '').trim().toLowerCase()
+    const frontMatch = frontPath.match(/:([^:]+)\.app:?$/)
+    if (!frontMatch) return false
+    const frontAppName = frontMatch[1]  // e.g. "iterm", "terminal", "intellij idea ce"
+
+    // Walk up parent process tree to find what GUI app is hosting Claude
+    let pid = process.ppid
+    for (let i = 0; i < 10; i++) {
+      const psResult = spawnSync('ps', ['-p', String(pid), '-o', 'ppid=,comm='], {
+        encoding: 'utf8', timeout: 2000,
+      })
+      if (psResult.status !== 0) break
+
+      const parts = psResult.stdout.trim().split(/\s+/)
+      if (parts.length < 2) break
+
+      const ppid    = parseInt(parts[0], 10)
+      const comm    = parts.slice(1).join(' ').toLowerCase()
+
+      // Match: ancestor name contains the frontmost app name or vice versa
+      if (comm.includes(frontAppName) || frontAppName.includes(comm)) {
+        return true
+      }
+
+      if (ppid <= 1) break
+      pid = ppid
+    }
+  } catch {
+    // Fail open — don't skip the dialog if detection fails
+  }
+  return false
+}
+
+// ──────────────────────────────────────────────────────────
 // macOS dialog (primary UI — no notification permission needed)
 // ──────────────────────────────────────────────────────────
+
 
 /**
  * Show a native macOS "display dialog" and return which button the user clicked.
@@ -226,8 +280,14 @@ function truncateLabel(s, max) {
  */
 export async function handlePermissionRequest(input) {
   const prompt = buildPendingPrompt(input)
-  writePending(prompt)
 
+  // If the app running Claude is already frontmost, the user is watching —
+  // skip the dialog and let the in-terminal prompt handle it.
+  if (isClaudeAppFrontmost()) {
+    return null
+  }
+
+  writePending(prompt)
   try {
     const action = showDialog(prompt)
     return buildHookOutput(prompt, action)
