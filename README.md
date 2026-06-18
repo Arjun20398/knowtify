@@ -1,10 +1,65 @@
 # Knowtify
 
-When Claude Code asks for permission, instead of switching to the terminal to type `1 / 2 / 3`, a native macOS dialog pops up wherever you are.
+Native macOS dialogs for **Claude Code**. When Claude needs your input — a
+permission prompt, or a question while it's waiting — Knowtify pops a dialog
+wherever you are, instead of making you switch back to the terminal.
 
-![dialog showing Yes / Allow All / No buttons]
+> Claude only. Cursor/Windsurf were evaluated and dropped: their hooks can't
+> replace the editor's own approval UI, so an external dialog can't be the
+> single prompt there. See the note at the bottom.
 
----
+## Architecture
+
+A small shared core (the "show a dialog over any app + collect the answer"
+layer) with a thin Claude adapter on top:
+
+```
+knowtify/
+├── core/        # shared, tool-agnostic primitives
+│   ├── dialog.mjs   # osascript Allow/Deny + text-input dialogs
+│   ├── focus.mjs    # is the host app frontmost?
+│   ├── logger.mjs   # per-channel rolling logs
+│   ├── paths.mjs    # ~/.knowtify layout
+│   └── io.mjs       # stdin / safe JSON
+│
+├── claude/      # adapter: PermissionRequest + Stop hooks
+│   ├── hooks/   # thin entry points (stdin → orchestrator → stdout)
+│   ├── lib/     # pure transformers + orchestrators with injected deps
+│   └── scripts/ # registers hooks in ~/.claude/settings.json
+│
+├── test/        # node:test suites (run orchestrators via fakes — no GUI)
+├── install.sh · uninstall.sh
+```
+
+**Design principles**
+- **Side effects are injected.** Each `lib` orchestrator takes its
+  dialog/focus/log/fs dependencies as parameters (defaulting to the real ones),
+  so tests drive every decision path without opening a dialog.
+- `core/` stays tool-agnostic, so a second adapter could be added later without
+  touching it.
+
+## Install
+
+```bash
+git clone https://github.com/Arjun20398/knowtify ~/.knowtify
+bash ~/.knowtify/install.sh
+```
+
+Syncs to `~/.knowtify` and registers the `PermissionRequest` + `Stop` hooks in
+`~/.claude/settings.json`. See [`claude/README.md`](./claude/README.md) for how
+it works.
+
+## Test
+
+```bash
+npm test        # node --test
+```
+
+## Uninstall
+
+```bash
+bash ~/.knowtify/uninstall.sh
+```
 
 ## Requirements
 
@@ -14,64 +69,11 @@ When Claude Code asks for permission, instead of switching to the terminal to ty
 | Node.js | 18 or later |
 | Claude Code | any recent version |
 
----
+## Why Claude only?
 
-## Install
-
-**Option A — from a local clone (current)**
-
-```bash
-git clone https://github.com/Arjun20398/knowtify ~/.knowtify
-bash ~/.knowtify/install.sh
-```
-
-**Option B — one-liner (once published)**
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Arjun20398/knowtify/main/install.sh)
-```
-
-The installer:
-1. Copies files to `~/.knowtify`
-2. Adds a `PermissionRequest` hook to `~/.claude/settings.json`
-3. Done — no background daemon, no notification permissions needed
-
----
-
-## How it works
-
-```
-Claude Code triggers a permission check
-          │
-          ▼
-  hooks/permission-request.mjs   (our Node.js hook)
-          │
-          ▼
-  osascript display dialog       (built-in macOS)
-          │
-    ┌─────┴──────────┬──────┐
-   Yes           Allow All   No
-    │                │        │
-    └────────────────┴────────┘
-          │
-          ▼
-  Decision sent back to Claude — no typing required
-```
-
----
-
-## Uninstall
-
-```bash
-bash ~/.knowtify/uninstall.sh
-```
-
-Removes the hook from `~/.claude/settings.json` and deletes `~/.knowtify`.
-
----
-
-## Roadmap
-
-- [ ] Cursor / Windsurf / Copilot support
-- [ ] Linux (libnotify) and Windows (PowerShell toast) notification backends
-- [ ] Daemon for polling-based alerts when sessions are waiting
+Claude Code's `PermissionRequest` hook **is** the authoritative approver — its
+allow/deny response is what Claude acts on, so a native dialog can fully replace
+the terminal prompt. Cursor and Windsurf hooks can only *add* a restriction
+(deny); their `allow` does not suppress the editor's own approval UI, so an
+external dialog can't be the single prompt. Rather than ship a confusing
+double-prompt, Knowtify focuses on Claude.

@@ -1,15 +1,14 @@
 {
   "name": "knowtify",
   "version": "0.1.0",
-  "description": "Universal AI input notifier — one notification when any coding agent needs your input",
+  "description": "Native macOS dialogs for AI coding agents when they need your input",
   "type": "module",
-  "bin": {
-    "knowtify": "./bin/knowtify.mjs"
-  },
   "engines": {
     "node": ">=18"
   },
-  "scripts": {},
+  "scripts": {
+    "test": "node --test"
+  },
   "keywords": [
     "claude",
     "notifications",
