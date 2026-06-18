@@ -1,7 +1,7 @@
 {
   "name": "knowtify",
   "version": "0.1.0",
-  "description": "Native macOS dialogs for AI coding agents when they need your input",
+  "description": "Native desktop dialogs for Claude Code when it needs your input (macOS, best-effort Linux)",
   "type": "module",
   "engines": {
     "node": ">=18"

@@ -3,13 +3,18 @@
 Native macOS dialogs for Claude Code — so you never have to switch back to the
 terminal to answer a prompt.
 
-Two things happen automatically when you're **not** focused on the Claude window:
+Things happen automatically when you're **not** focused on the Claude window:
 
 1. **Permission prompts** → a native Allow / Allow All / Deny dialog pops up
    wherever you are. Your choice is sent straight back to Claude.
-2. **"Waiting for your input"** → when Claude ends a turn with a question, a
-   text-input dialog appears. Whatever you type is injected back so Claude
-   continues — no window switching needed.
+2. **Multiple-choice questions** (`AskUserQuestion`) → rendered as a native list
+   dialog; your selection is sent back so Claude continues. Pick *"Other"* to
+   answer in your own words back in the Claude window.
+3. **Open-ended questions** → when Claude ends a turn waiting on a free-form
+   reply, a dialog offers **Open Claude** (jumps you back to the window so you
+   type the answer there — no cramped inline box) or **Dismiss**.
+4. **Quiet completions** → when Claude finishes without needing input, a small
+   banner with a chime appears (e.g. "✻ Clauding for 20s").
 
 If the Claude window is already frontmost, Knowtify stays out of the way and
 lets the normal in-terminal flow handle it.
@@ -51,3 +56,7 @@ That copies the repo to `~/.knowtify` and registers the `PermissionRequest` and
 ```
 ~/.knowtify/logs/claude.log   # rolling, last 1000 lines
 ```
+
+Logs are metadata only (project name, session id, timings, message length) —
+the assistant's message text is never written to disk. The `~/.knowtify`
+directory and its log files are created with owner-only permissions (0700/0600).

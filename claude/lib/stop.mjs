@@ -205,7 +205,8 @@ export function handleStop(input, deps = {}) {
     return null
   }
 
-  log('info', 'showing reply prompt', { project, preview: message.slice(-160) })
+  // Log only metadata, never the message text — it can contain secrets.
+  log('info', 'showing reply prompt', { project, messageChars: message.length })
 
   // Claude is waiting for a typed answer. Don't capture it in a small box —
   // offer to jump back to the Claude window so the user replies there.

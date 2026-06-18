@@ -3,7 +3,7 @@
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/Arjun20398/knowtify/main/install.sh)
 # Or locally: bash install.sh
 
-set -uo pipefail
+set -euo pipefail
 
 INSTALL_DIR="$HOME/.knowtify"
 SETTINGS="$HOME/.claude/settings.json"
@@ -42,12 +42,19 @@ if [[ -f "$SRC/install.sh" && "$SRC" != "$INSTALL_DIR" ]]; then
   rsync -a --delete --exclude .git --exclude test "$SRC/" "$INSTALL_DIR/"
 elif [[ -d "$INSTALL_DIR/.git" ]]; then
   echo "  Existing install found — pulling latest..."
-  git -C "$INSTALL_DIR" pull --ff-only --quiet
+  if ! git -C "$INSTALL_DIR" pull --ff-only --quiet; then
+    red "  git pull failed (local changes or diverged history) in $INSTALL_DIR."
+    red "  Resolve it, or remove $INSTALL_DIR and re-run. Aborting."
+    exit 1
+  fi
 elif [[ "$SRC" == "$INSTALL_DIR" ]]; then
   echo "  Already at install path, skipping copy"
 else
   echo "  Cloning $REPO_URL"
-  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+  if ! git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"; then
+    red "  git clone failed. Check your network and that $REPO_URL is reachable. Aborting."
+    exit 1
+  fi
 fi
 echo "  Files ready ✓"
 

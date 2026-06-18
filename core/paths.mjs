@@ -22,7 +22,9 @@ export function logPath(channel) {
 }
 
 export function ensureDirs() {
+  // 0700: logs can contain prompt/answer snippets, so keep the tree private to
+  // the owning user rather than world-readable (default umask).
   for (const dir of [ROOT, PENDING_DIR, LOGS_DIR]) {
-    fs.mkdirSync(dir, { recursive: true })
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
 }

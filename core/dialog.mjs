@@ -16,6 +16,47 @@ function truncateLabel(s, max) {
 }
 
 /**
+ * Escape a value for safe embedding inside an AppleScript double-quoted string
+ * literal. AppleScript treats `\` as an escape character, so backslashes MUST be
+ * doubled before quotes are escaped — otherwise a value ending in `\` would
+ * escape the closing quote and let following text leak into the string (or break
+ * the script entirely). The dialog body is passed via a temp file and never goes
+ * through here, but every other dynamic value (titles, button labels, list
+ * options, notification text) does.
+ * @param {unknown} s
+ * @returns {string}
+ */
+function asLiteral(s) {
+  return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+/**
+ * Write `content` to a freshly-created, private temp file and hand back its path
+ * plus a cleanup fn. We create a per-call directory via mkdtempSync (mode 0700)
+ * and write the file with an exclusive (`wx`) handle at mode 0600. On a shared
+ * /tmp (multi-user Linux) this defeats the classic predictable-name symlink /
+ * TOCTOU attack — an attacker can neither pre-create the path nor read the
+ * prompt body that's briefly staged there.
+ * @param {string} content
+ * @returns {{ file: string, cleanup: () => void } | null}
+ */
+function writeTempFile(content) {
+  let dir
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'knowtify-'))
+    const file = path.join(dir, 'body.txt')
+    fs.writeFileSync(file, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    return {
+      file,
+      cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} },
+    }
+  } catch {
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }) } catch {} }
+    return null
+  }
+}
+
+/**
  * Did the child process fail to *run* (binary missing, killed, timed out), as
  * opposed to running and returning a non-zero status (which means the user
  * cancelled)? spawnSync sets `.error` and a null `.status` on failure.
@@ -75,35 +116,31 @@ function showDialogOsascript(o, run, bin) {
     ? [o.denyLabel, truncateLabel(o.allowAllLabel, 40), o.allowLabel]
     : [o.denyLabel, o.allowLabel]
 
-  const safeTitle   = o.title.replace(/"/g, '')
-  const safeButtons = buttons.map(b => b.replace(/"/g, ''))
-  const btnScript   = safeButtons.map(b => `"${b}"`).join(', ')
-  const defaultBtn  = safeButtons.at(-1)
-  const cancelBtn   = safeButtons[0]
+  // Build the script from escaped literals, but compare against the *raw* labels
+  // below — osascript returns the displayed (unescaped) button text.
+  const btnScript   = buttons.map(b => `"${asLiteral(b)}"`).join(', ')
+  const defaultBtn  = buttons.at(-1)
+  const cancelBtn   = buttons[0]
 
   // Body via temp file to sidestep AppleScript quote-escaping.
-  const tmpFile = path.join(os.tmpdir(), `knowtify-${Date.now()}.txt`)
-  try {
-    fs.writeFileSync(tmpFile, o.body, 'utf8')
-  } catch (err) {
-    return { result: 'unavailable', meta: { reason: 'tmpfile-write-failed', error: String(err) } }
-  }
+  const tmp = writeTempFile(o.body)
+  if (!tmp) return { result: 'unavailable', meta: { reason: 'tmpfile-write-failed' } }
 
   const script = `
-set f to open for access POSIX file "${tmpFile}"
+set f to open for access POSIX file "${asLiteral(tmp.file)}"
 set msg to read f as «class utf8»
 close access f
 set theResult to display dialog msg ¬
   buttons {${btnScript}} ¬
-  default button "${defaultBtn}" ¬
-  cancel button "${cancelBtn}" ¬
+  default button "${asLiteral(defaultBtn)}" ¬
+  cancel button "${asLiteral(cancelBtn)}" ¬
   with icon caution ¬
-  with title "${safeTitle}"
+  with title "${asLiteral(o.title)}"
 return button returned of theResult
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
-  try { fs.unlinkSync(tmpFile) } catch {}
+  tmp.cleanup()
 
   const meta = {
     tool: 'osascript',
@@ -121,7 +158,7 @@ return button returned of theResult
 
   const clicked = (result.stdout || '').trim()
   if (clicked === defaultBtn) return { result: 'allow', meta: { ...meta, clicked } }
-  if (o.allowAllLabel && clicked === safeButtons.at(-2)) return { result: 'allow-all', meta: { ...meta, clicked } }
+  if (o.allowAllLabel && clicked === buttons.at(-2)) return { result: 'allow-all', meta: { ...meta, clicked } }
   return { result: 'deny', meta: { ...meta, clicked, reason: 'non-default-button' } }
 }
 
@@ -212,23 +249,19 @@ export function showInputDialog(opts, deps = {}) {
  * Return inserts a newline, the text wraps, and it scrolls once it overflows.
  */
 function showInputOsascript(o, run, bin) {
-  const safeTitle   = o.title.replace(/"/g, '')
-  const safeSend    = o.sendLabel.replace(/"/g, '')
-  const safeDismiss = o.dismissLabel.replace(/"/g, '')
-  const safeDefault = o.defaultAnswer.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const safeTitle   = asLiteral(o.title)
+  const safeSend    = asLiteral(o.sendLabel)
+  const safeDismiss = asLiteral(o.dismissLabel)
+  const safeDefault = asLiteral(o.defaultAnswer)
 
-  const tmpFile = path.join(os.tmpdir(), `knowtify-input-${Date.now()}.txt`)
-  try {
-    fs.writeFileSync(tmpFile, o.body, 'utf8')
-  } catch {
-    return null
-  }
+  const tmp = writeTempFile(o.body)
+  if (!tmp) return null
 
   const script = `
 use framework "Foundation"
 use framework "AppKit"
 use scripting additions
-set bodyText to (read (POSIX file "${tmpFile}") as «class utf8»)
+set bodyText to (read (POSIX file "${asLiteral(tmp.file)}") as «class utf8»)
 set theApp to current application
 set a to theApp's NSAlert's alloc()'s init()
 a's setMessageText:"${safeTitle}"
@@ -256,7 +289,7 @@ end if
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
-  try { fs.unlinkSync(tmpFile) } catch {}
+  tmp.cleanup()
 
   if (spawnFailed(result) || result.status !== 0) return null
   const out = (result.stdout || '').replace(/\n$/, '')
@@ -310,10 +343,10 @@ export function showNotification(opts, deps = {}) {
   try {
     switch (cfg.notify?.tool) {
       case 'osascript': {
-        const t = title.replace(/"/g, '')
-        const m = message.replace(/"/g, '')
-        const sub = opts.subtitle ? ` subtitle "${String(opts.subtitle).replace(/"/g, '')}"` : ''
-        const snd = sound ? ` sound name "${String(sound).replace(/"/g, '')}"` : ''
+        const t = asLiteral(title)
+        const m = asLiteral(message)
+        const sub = opts.subtitle ? ` subtitle "${asLiteral(opts.subtitle)}"` : ''
+        const snd = sound ? ` sound name "${asLiteral(sound)}"` : ''
         const r = run(cfg.notify.path, ['-e', `display notification "${m}" with title "${t}"${sub}${snd}`], { encoding: 'utf8', timeout: 5000 })
         return !spawnFailed(r) && r.status === 0
       }
@@ -384,21 +417,19 @@ export function showChoiceDialog(opts, deps = {}) {
 
 /** macOS — AppleScript `choose from list`. */
 function showChoiceOsascript(o, run, bin) {
-  const items = o.options.map(s => `"${s.replace(/"/g, '')}"`).join(', ')
-  const safeTitle   = o.title.replace(/"/g, '')
-  const safeSend    = o.sendLabel.replace(/"/g, '')
-  const safeDismiss = o.dismissLabel.replace(/"/g, '')
+  // Build the list literal from escaped options; the raw labels are what
+  // osascript returns and what callers match against downstream.
+  const items = o.options.map(s => `"${asLiteral(s)}"`).join(', ')
+  const safeTitle   = asLiteral(o.title)
+  const safeSend    = asLiteral(o.sendLabel)
+  const safeDismiss = asLiteral(o.dismissLabel)
   const multi = o.multiSelect ? 'true' : 'false'
 
-  const tmpFile = path.join(os.tmpdir(), `knowtify-choice-${Date.now()}.txt`)
-  try {
-    fs.writeFileSync(tmpFile, o.body, 'utf8')
-  } catch {
-    return { result: 'unavailable', selected: [], meta: { reason: 'tmpfile-write-failed' } }
-  }
+  const tmp = writeTempFile(o.body)
+  if (!tmp) return { result: 'unavailable', selected: [], meta: { reason: 'tmpfile-write-failed' } }
 
   const script = `
-set f to open for access POSIX file "${tmpFile}"
+set f to open for access POSIX file "${asLiteral(tmp.file)}"
 set msg to read f as «class utf8»
 close access f
 set AppleScript's text item delimiters to linefeed
@@ -410,7 +441,7 @@ return chosen as text
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
-  try { fs.unlinkSync(tmpFile) } catch {}
+  tmp.cleanup()
 
   const meta = { tool: 'osascript', status: result.status, stderr: (result.stderr || '').trim() }
   if (spawnFailed(result)) return { result: 'unavailable', selected: [], meta: { ...meta, reason: 'osascript-unavailable' } }

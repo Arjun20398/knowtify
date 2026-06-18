@@ -39,9 +39,10 @@ settings.hooks[event] = settings.hooks[event].filter(entry =>
   !entry.hooks.some(h => typeof h.command === 'string' && h.command.includes('knowtify'))
 )
 
-// PermissionRequest/PreToolUse use a tool matcher; lifecycle events (Stop) do not.
+// PermissionRequest/PreToolUse use a tool matcher; lifecycle events (Stop) do
+// not. `.*` (match-all regex) mirrors the plugin's hooks.json.
 const entry = (event === 'PermissionRequest' || event === 'PreToolUse')
-  ? { matcher: '*', hooks: [{ type: 'command', command: hookCmd }] }
+  ? { matcher: '.*', hooks: [{ type: 'command', command: hookCmd }] }
   : { hooks: [{ type: 'command', command: hookCmd }] }
 
 settings.hooks[event].push(entry)

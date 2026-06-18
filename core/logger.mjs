@@ -27,7 +27,8 @@ function trimLog(filePath, maxLines) {
 function appendRollingLog(filePath, line, maxLines = ROLLING_LOG_MAX_LINES) {
   try {
     ensureDirs()
-    fs.appendFileSync(filePath, line + '\n')
+    // mode 0600 applies on creation; logs may hold prompt/answer snippets.
+    fs.appendFileSync(filePath, line + '\n', { mode: 0o600 })
     trimLog(filePath, maxLines)
   } catch {
     // ignore if log dir missing

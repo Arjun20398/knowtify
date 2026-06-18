@@ -18,13 +18,13 @@ function runPatch(file, cmd, event) {
   return spawnSync('node', args, { encoding: 'utf8' })
 }
 
-test('fresh file → PermissionRequest with matcher "*"', () => {
+test('fresh file → PermissionRequest with matcher ".*"', () => {
   const f = tmpFile('fresh')
   runPatch(f, 'node /x/knowtify/claude/hooks/permission-request.mjs')
   const s = JSON.parse(fs.readFileSync(f, 'utf8'))
   fs.unlinkSync(f)
   assert.equal(s.hooks.PermissionRequest.length, 1)
-  assert.equal(s.hooks.PermissionRequest[0].matcher, '*')
+  assert.equal(s.hooks.PermissionRequest[0].matcher, '.*')
 })
 
 test('Stop event → no matcher', () => {

@@ -1,8 +1,13 @@
 # Knowtify
 
-Native macOS dialogs for **Claude Code**. When Claude needs your input — a
+Native desktop dialogs for **Claude Code**. When Claude needs your input — a
 permission prompt, or a question while it's waiting — Knowtify pops a dialog
 wherever you are, instead of making you switch back to the terminal.
+
+Built and tested primarily on **macOS** (AppleScript). **Linux** is supported
+on a best-effort basis via `zenity`/`kdialog` (dialogs), `notify-send`
+(banners), and `xdotool` (focus, X11 only); if none are installed, Knowtify
+quietly defers to Claude's in-terminal prompts.
 
 > Claude only. Cursor/Windsurf were evaluated and dropped: their hooks can't
 > replace the editor's own approval UI, so an external dialog can't be the
@@ -65,7 +70,7 @@ bash ~/.knowtify/uninstall.sh
 
 | | |
 |---|---|
-| macOS | 12 Monterey or later |
+| OS | macOS 12 Monterey or later (primary); Linux with `zenity`/`kdialog` (best-effort) |
 | Node.js | 18 or later |
 | Claude Code | any recent version |
 

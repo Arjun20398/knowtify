@@ -40,6 +40,39 @@ test('showDialog osascript: cancel (non-zero, ran) → deny', () => {
   assert.equal(r.result, 'deny')
 })
 
+test('showDialog osascript: escapes quotes and backslashes in title/labels', () => {
+  let script
+  const nasty = { title: 'proj "x"\\', body: 'B', allowLabel: 'Yes', denyLabel: 'No' }
+  showDialog(nasty, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'Yes' }) } })
+  // The trailing backslash and embedded quotes must be escaped so they can't
+  // terminate the AppleScript string literal early.
+  assert.match(script, /with title "proj \\"x\\"\\\\"/)
+})
+
+test('showDialog osascript: a quote in a button label still matches the raw click', () => {
+  // osascript returns the displayed (unescaped) label; comparison uses raw text.
+  const quoted = { title: 'T', body: 'B', allowLabel: 'Say "hi"', denyLabel: 'No' }
+  const r = showDialog(quoted, { platform: MAC, run: () => ok({ stdout: 'Say "hi"' }) })
+  assert.equal(r.result, 'allow')
+})
+
+test('showChoiceDialog osascript: escapes options in the list literal', () => {
+  let script
+  showChoiceDialog({ title: 'T', body: 'Pick', options: ['a"b', 'c\\d'] },
+    { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'a"b\n' }) } })
+  assert.match(script, /"a\\"b"/)
+  assert.match(script, /"c\\\\d"/)
+})
+
+test('showNotification osascript: escapes quotes in title/message', () => {
+  let seenArgs
+  showNotification({ title: 'done "x"', message: 'proj\\' },
+    { platform: MAC, run: (_b, args) => { seenArgs = args; return ok() } })
+  const joined = seenArgs.join(' ')
+  assert.match(joined, /with title "done \\"x\\""/)
+  assert.match(joined, /display notification "proj\\\\"/)
+})
+
 test('showDialog zenity: ok → allow', () => {
   const r = showDialog(opts, { platform: ZENITY, run: () => ok() })
   assert.equal(r.result, 'allow')
