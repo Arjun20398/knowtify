@@ -1,5 +1,0 @@
-{
-  "name": "knowtify",
-  "version": "0.1.0",
-  "description": "Route Claude permission prompts and 'waiting for input' to native macOS dialogs"
-}

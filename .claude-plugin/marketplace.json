@@ -1,0 +1,21 @@
+{
+  "name": "knowtify",
+  "owner": {
+    "name": "Arjun Singh"
+  },
+  "metadata": {
+    "description": "Knowtify — native desktop dialogs for Claude Code",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "knowtify",
+      "source": "./",
+      "description": "Native desktop dialogs for Claude Code permission prompts and questions",
+      "version": "0.1.0",
+      "author": {
+        "name": "Arjun Singh"
+      }
+    }
+  ]
+}

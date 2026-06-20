@@ -1,0 +1,19 @@
+{
+  "name": "knowtify",
+  "description": "Native desktop dialogs for Claude Code — surfaces permission prompts and questions wherever you are, instead of making you switch back to the terminal",
+  "version": "0.1.0",
+  "author": {
+    "name": "Arjun Singh"
+  },
+  "homepage": "https://github.com/Arjun20398/knowtify",
+  "repository": "https://github.com/Arjun20398/knowtify",
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "notifications",
+    "permissions",
+    "dialogs",
+    "macos"
+  ]
+}

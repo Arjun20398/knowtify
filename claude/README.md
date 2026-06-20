@@ -23,33 +23,40 @@ lets the normal in-terminal flow handle it.
 
 ```
 claude/
-├── .claude-plugin/plugin.json   # Claude plugin manifest
 ├── hooks/
-│   ├── hooks.json               # plugin hook registration
 │   ├── permission-request.mjs   # PermissionRequest entry point (thin)
 │   └── stop.mjs                 # Stop entry point (thin)
 ├── lib/
 │   ├── permission-request.mjs   # pure builders + orchestrator (injected deps)
 │   └── stop.mjs                 # question heuristics + orchestrator
 └── scripts/
-    └── patch-settings.mjs       # registers hooks in ~/.claude/settings.json
+    └── patch-settings.mjs       # registers hooks in ~/.claude/settings.json (manual install)
 ```
 
-The macOS dialog, focus detection, logging, and stdin/JSON helpers come from
-the shared [`../core`](../core). Each `lib` orchestrator accepts its
-side-effecting dependencies as parameters, so the decision logic is unit-tested
-(see [`../test`](../test)) without opening a dialog.
+The plugin manifest (`.claude-plugin/plugin.json`) and hook registration
+(`hooks/hooks.json`) live at the **repo root**, not here, so the whole repo
+installs as one Claude Code plugin and the hook scripts can still reach the
+shared [`../core`](../core). Each `lib` orchestrator accepts its side-effecting
+dependencies as parameters, so the decision logic is unit-tested (see
+[`../test`](../test)) without opening a dialog.
 
 ## Install
 
-From the repo root:
+Preferred — as a Claude Code plugin (from inside Claude Code):
+
+```
+/plugin marketplace add Arjun20398/knowtify
+/plugin install knowtify@knowtify
+```
+
+Or manually, from the repo root:
 
 ```bash
 bash install.sh
 ```
 
-That copies the repo to `~/.knowtify` and registers the `PermissionRequest` and
-`Stop` hooks in `~/.claude/settings.json`.
+The manual path copies the repo to `~/.knowtify` and registers the
+`PermissionRequest` and `Stop` hooks in `~/.claude/settings.json`.
 
 ## Logs
 

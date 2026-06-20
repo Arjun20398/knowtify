@@ -19,7 +19,13 @@ A small shared core (the "show a dialog over any app + collect the answer"
 layer) with a thin Claude adapter on top:
 
 ```
-knowtify/
+knowtify/                       # ← this repo *is* the Claude Code plugin
+├── .claude-plugin/
+│   ├── plugin.json   # plugin manifest (name, version, hooks)
+│   └── marketplace.json # self-marketplace, so `/plugin marketplace add` works
+├── hooks/
+│   └── hooks.json    # registers PermissionRequest + Stop with Claude Code
+│
 ├── core/        # shared, tool-agnostic primitives
 │   ├── dialog.mjs   # osascript Allow/Deny + text-input dialogs
 │   ├── focus.mjs    # is the host app frontmost?
@@ -30,10 +36,10 @@ knowtify/
 ├── claude/      # adapter: PermissionRequest + Stop hooks
 │   ├── hooks/   # thin entry points (stdin → orchestrator → stdout)
 │   ├── lib/     # pure transformers + orchestrators with injected deps
-│   └── scripts/ # registers hooks in ~/.claude/settings.json
+│   └── scripts/ # patch-settings.mjs (manual, non-plugin install)
 │
 ├── test/        # node:test suites (run orchestrators via fakes — no GUI)
-├── install.sh · uninstall.sh
+├── install.sh · uninstall.sh   # manual install path
 ```
 
 **Design principles**
@@ -44,6 +50,23 @@ knowtify/
   touching it.
 
 ## Install
+
+### Claude Code plugin (recommended)
+
+Knowtify is a self-contained Claude Code plugin. From inside Claude Code:
+
+```
+/plugin marketplace add Arjun20398/knowtify
+/plugin install knowtify@knowtify
+```
+
+That's it — Claude registers the `PermissionRequest` + `Stop` hooks for you, no
+shell script and no extra setup (GUI backends are detected at runtime). Update
+later by re-running `/plugin marketplace add Arjun20398/knowtify`.
+
+### Manual install (no plugin system)
+
+If you'd rather wire it into `~/.claude/settings.json` directly:
 
 ```bash
 git clone https://github.com/Arjun20398/knowtify ~/.knowtify
@@ -60,11 +83,27 @@ it works.
 npm test        # node --test
 ```
 
+## Update
+
+- **Plugin:** re-run `/plugin marketplace add Arjun20398/knowtify` (refreshes the
+  marketplace), then `/plugin install knowtify@knowtify`. Run `/reload-plugins`
+  to pick up the new hooks in the current session.
+- **Manual:** re-run `bash ~/.knowtify/install.sh` (it pulls the latest).
+
 ## Uninstall
 
-```bash
-bash ~/.knowtify/uninstall.sh
-```
+- **Plugin:** from inside Claude Code —
+
+  ```
+  /plugin uninstall knowtify@knowtify
+  /plugin marketplace remove knowtify
+  ```
+
+- **Manual:**
+
+  ```bash
+  bash ~/.knowtify/uninstall.sh
+  ```
 
 ## Requirements
 
