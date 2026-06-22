@@ -1,6 +1,6 @@
 {
   "name": "knowtify",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native desktop dialogs for Claude Code when it needs your input (macOS, best-effort Linux)",
   "type": "module",
   "engines": {
