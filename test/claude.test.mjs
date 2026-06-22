@@ -6,7 +6,7 @@ import {
 } from '../claude/lib/permission-request.mjs'
 import {
   looksLikeQuestion, readLastAssistantMessage, forDisplay, handleStop,
-  formatDuration, completionLabel, readTurnDurationMs,
+  formatDuration, completionLabel, readTurnDurationMs, parseOptions,
 } from '../claude/lib/stop.mjs'
 
 // ── permission: pure ──
@@ -270,4 +270,70 @@ test('handleStop: question but dismissed → null, no focus', () => {
   })
   assert.equal(out, null)
   assert.equal(focused, false)
+})
+
+// ── stop: parseOptions ──
+test('parseOptions: letter options → question + options', () => {
+  const r = parseOptions('What is 2 + 2?\n\nA. 3\nB. 4\nC. 5\nD. 22')
+  assert.equal(r.question, 'What is 2 + 2?')
+  assert.deepEqual(r.options, ['A. 3', 'B. 4', 'C. 5', 'D. 22'])
+})
+test('parseOptions: numbered + paren styles', () => {
+  const r = parseOptions('Pick one:\n1) Redis\n2) In-memory')
+  assert.deepEqual(r.options, ['1) Redis', '2) In-memory'])
+  assert.equal(r.question, 'Pick one:')
+})
+test('parseOptions: fewer than 2 options → null', () => {
+  assert.equal(parseOptions('Just one thing?\nA. only'), null)
+})
+test('parseOptions: prose with no enumeration → null', () => {
+  assert.equal(parseOptions('Which approach do you prefer?'), null)
+})
+
+// ── stop: option-button path ──
+const optMsg = 'What is 2 + 2?\n\nA. 3\nB. 4\nC. 5\nD. 22'
+test('handleStop: option picked → injects it via decision:block', () => {
+  let usedPlain = false
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => optMsg,
+    showOptionsDialog: () => ({ result: 'option', index: 1, label: 'B. 4', meta: {} }),
+    showDialog: () => { usedPlain = true; return { result: 'deny', meta: {} } },
+    log: () => {},
+  })
+  assert.deepEqual(out, { decision: 'block', reason: 'B. 4' })
+  assert.equal(usedPlain, false)
+})
+test('handleStop: options + Open Claude → focuses, null', () => {
+  let focused = false
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => optMsg,
+    showOptionsDialog: () => ({ result: 'open', meta: {} }),
+    focusHostApp: () => { focused = true; return true },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(focused, true)
+})
+test('handleStop: options + Dismiss → null', () => {
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => optMsg,
+    showOptionsDialog: () => ({ result: 'dismiss', meta: {} }),
+    log: () => {},
+  })
+  assert.equal(out, null)
+})
+test('handleStop: options backend unavailable → falls back to plain dialog', () => {
+  let usedPlain = false
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => optMsg,
+    showOptionsDialog: () => ({ result: 'unavailable', meta: {} }),
+    showDialog: () => { usedPlain = true; return { result: 'deny', meta: {} } },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(usedPlain, true)
 })

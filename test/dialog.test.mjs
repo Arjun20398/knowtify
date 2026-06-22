@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { showDialog, showInputDialog, showChoiceDialog, showNotification } from '../core/dialog.mjs'
+import { showDialog, showInputDialog, showChoiceDialog, showOptionsDialog, showNotification } from '../core/dialog.mjs'
 import { isHostAppFrontmost, focusHostApp } from '../core/focus.mjs'
 
 const osa = { tool: 'osascript', path: '/usr/bin/osascript' }
@@ -100,6 +100,64 @@ test('showDialog passes the resolved binary path to run', () => {
   assert.equal(seen, '/usr/bin/zenity')
 })
 
+// ── options dialog ──
+const optDlg = { title: 'T', heading: 'Pick', body: 'Q', options: ['A. 3', 'B. 4', 'C. 5'], openLabel: 'Open Claude', dismissLabel: 'Dismiss' }
+
+test('showOptionsDialog: no backend → unavailable', () => {
+  const r = showOptionsDialog(optDlg, { platform: HEADLESS, run: () => { throw new Error('nope') } })
+  assert.equal(r.result, 'unavailable')
+})
+
+test('showOptionsDialog: empty options → unavailable', () => {
+  const r = showOptionsDialog({ ...optDlg, options: [] }, { platform: MAC, run: () => { throw new Error('nope') } })
+  assert.equal(r.result, 'unavailable')
+})
+
+test('showOptionsDialog osascript: rc 1000 → first option', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ok({ stdout: '1000' }) })
+  assert.equal(r.result, 'option')
+  assert.equal(r.index, 0)
+  assert.equal(r.label, 'A. 3')
+})
+
+test('showOptionsDialog osascript: rc 1002 → third option', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ok({ stdout: '1002' }) })
+  assert.equal(r.result, 'option')
+  assert.equal(r.index, 2)
+  assert.equal(r.label, 'C. 5')
+})
+
+test('showOptionsDialog osascript: rc after options → open', () => {
+  // 3 options → add indices 0,1,2; Open is the 4th button → rc 1003
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ok({ stdout: '1003' }) })
+  assert.equal(r.result, 'open')
+})
+
+test('showOptionsDialog osascript: last rc → dismiss', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ok({ stdout: '1004' }) })
+  assert.equal(r.result, 'dismiss')
+})
+
+test('showOptionsDialog osascript: cancel (non-zero, ran) → dismiss', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ({ status: 1, signal: null, stdout: '', stderr: 'x' }) })
+  assert.equal(r.result, 'dismiss')
+})
+
+test('showOptionsDialog osascript: spawn failure → unavailable', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ({ error: new Error('ENOENT'), status: null, stdout: '' }) })
+  assert.equal(r.result, 'unavailable')
+})
+
+test('showOptionsDialog osascript: adds a button per option + Open + Dismiss, escaped', () => {
+  let script
+  showOptionsDialog({ ...optDlg, options: ['A. say "hi"', 'B. plain'] },
+    { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: '1000' }) } })
+  assert.match(script, /addButtonWithTitle:"A\. say \\"hi\\""/)
+  assert.match(script, /addButtonWithTitle:"B\. plain"/)
+  assert.match(script, /addButtonWithTitle:"Open Claude"/)
+  assert.match(script, /addButtonWithTitle:"Dismiss"/)
+})
+
 // ── input dispatch ──
 const inOpts = { title: 'T', body: 'B' }
 
@@ -174,6 +232,44 @@ test('showChoiceDialog: spawn failure → unavailable', () => {
 test('showChoiceDialog osascript: cancel sentinel → cancel', () => {
   const r = showChoiceDialog(choiceOpts, { platform: MAC, run: () => ok({ stdout: '@@KNOWTIFY_CANCEL@@\n' }) })
   assert.equal(r.result, 'cancel')
+})
+
+test('showChoiceDialog osascript: single-select uses radio rows + dividers + Send', () => {
+  let script
+  showChoiceDialog(choiceOpts, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'B\n' }) } })
+  assert.match(script, /setButtonType:4/)        // radio
+  assert.match(script, /setBoxType:2/)            // separator between rows
+  assert.match(script, /addButtonWithTitle:"Send"/)
+  assert.match(script, /addButtonWithTitle:"Dismiss"/)
+})
+
+test('showChoiceDialog osascript: multi-select uses checkbox rows', () => {
+  let script
+  showChoiceDialog({ ...choiceOpts, multiSelect: true }, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'A\nC\n' }) } })
+  assert.match(script, /setButtonType:3/)         // switch / checkbox
+})
+
+test('showChoiceDialog osascript: reads checked labels (newline-joined stdout)', () => {
+  const r = showChoiceDialog(choiceOpts, { platform: MAC, run: () => ok({ stdout: 'A\nC\n' }) })
+  assert.equal(r.result, 'ok')
+  assert.deepEqual(r.selected, ['A', 'C'])
+})
+
+// ── popup sound (macOS) ──
+test('showDialog osascript: plays a subtle popup sound (afplay)', () => {
+  let script
+  showDialog(opts, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'Yes' }) } })
+  assert.match(script, /afplay -v 0\.25 .*Tink\.aiff/)
+})
+test('showOptionsDialog osascript: plays a subtle popup sound (NSSound)', () => {
+  let script
+  showOptionsDialog(optDlg, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: '1000' }) } })
+  assert.match(script, /NSSound's soundNamed:"Tink"/)
+})
+test('showChoiceDialog osascript: plays a subtle popup sound (NSSound)', () => {
+  let script
+  showChoiceDialog(choiceOpts, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'B\n' }) } })
+  assert.match(script, /NSSound's soundNamed:"Tink"/)
 })
 
 // ── notification dispatch ──

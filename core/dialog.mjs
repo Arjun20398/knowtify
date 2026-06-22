@@ -66,6 +66,35 @@ function spawnFailed(result) {
   return Boolean(result.error) || result.status === null
 }
 
+// A soft "this just popped up" cue — quiet enough to register as a UI tick, not
+// an alarm. Plays the instant any Knowtify dialog appears.
+const POPUP_SOUND = 'Tink'
+const POPUP_SOUND_VOLUME = 0.25
+
+/**
+ * AppleScriptObjC lines that play the popup sound — for scripts that already
+ * `use framework "AppKit"` (NSAlert dialogs). `play()` returns immediately so
+ * the chime rings while the modal blocks. Requires `theApp` in scope.
+ * @returns {string}
+ */
+function macSoundObjC() {
+  return `set _snd to (theApp's NSSound's soundNamed:"${POPUP_SOUND}")
+if _snd is not missing value then
+  (_snd's setVolume:${POPUP_SOUND_VOLUME})
+  (_snd's play())
+end if`
+}
+
+/**
+ * A StandardAdditions line that plays the popup sound for plain AppleScript
+ * (`display dialog`) where no Cocoa frameworks are loaded. Backgrounded with `&`
+ * so it never blocks the dialog from showing.
+ * @returns {string}
+ */
+function macSoundShell() {
+  return `do shell script "afplay -v ${POPUP_SOUND_VOLUME} /System/Library/Sounds/${POPUP_SOUND}.aiff >/dev/null 2>&1 &"`
+}
+
 // ──────────────────────────────────────────────────────────
 // Confirm dialog: Allow / Allow-All / Deny
 // Result is one of:
@@ -127,6 +156,7 @@ function showDialogOsascript(o, run, bin) {
   if (!tmp) return { result: 'unavailable', meta: { reason: 'tmpfile-write-failed' } }
 
   const script = `
+${macSoundShell()}
 set f to open for access POSIX file "${asLiteral(tmp.file)}"
 set msg to read f as «class utf8»
 close access f
@@ -200,6 +230,115 @@ function showDialogKdialog(o, run, bin) {
   if (result.status === 0) return { result: 'allow', meta }
   if (o.allowAllLabel && result.status === 1) return { result: 'allow-all', meta }
   return { result: 'deny', meta }
+}
+
+// ──────────────────────────────────────────────────────────
+// Options dialog: one button per parsed option, plus two fixed
+// trailing buttons (e.g. Open Claude / Dismiss).
+// Result is one of:
+//   { result: 'option', index, label } → user picked options[index]
+//   { result: 'open' }                 → trailing primary button
+//   { result: 'dismiss' }              → trailing secondary button / cancel
+//   { result: 'unavailable' }          → no GUI / unsupported backend
+// ──────────────────────────────────────────────────────────
+
+/**
+ * Show a dialog with a button for each option plus two trailing buttons.
+ * Currently macOS-only (NSAlert); other backends return 'unavailable' so the
+ * caller can fall back to a plain two-button dialog.
+ *
+ * @param {{
+ *   title:         string,
+ *   heading?:      string,
+ *   body?:         string,
+ *   options:       string[],
+ *   openLabel?:    string,
+ *   dismissLabel?: string,
+ *   sound?:        string | null,
+ *   timeout?:      number,
+ * }} opts
+ * @param {{ run?: typeof spawnSync, platform?: import('./platform.mjs').PlatformConfig }} [deps]
+ * @returns {{ result: 'option' | 'open' | 'dismiss' | 'unavailable', index?: number, label?: string, meta: Record<string, unknown> }}
+ */
+export function showOptionsDialog(opts, deps = {}) {
+  const run = deps.run ?? spawnSync
+  const cfg = deps.platform ?? getPlatformConfig()
+
+  const o = {
+    title:        opts.title,
+    heading:      opts.heading ?? opts.title,
+    body:         opts.body ?? '',
+    options:      Array.isArray(opts.options) ? opts.options : [],
+    openLabel:    opts.openLabel ?? 'Open Claude',
+    dismissLabel: opts.dismissLabel ?? 'Dismiss',
+    sound:        opts.sound === undefined ? 'Tink' : opts.sound,
+    timeout:      opts.timeout ?? DEFAULT_DIALOG_TIMEOUT,
+  }
+
+  if (!o.options.length) return { result: 'unavailable', meta: { reason: 'no-options' } }
+
+  switch (cfg.dialog?.tool) {
+    case 'osascript': return showOptionsOsascript(o, run, cfg.dialog.path)
+    default:          return { result: 'unavailable', meta: { reason: 'unsupported-backend', os: cfg.os } }
+  }
+}
+
+/**
+ * macOS — an NSAlert whose buttons are: each option (in order), then the Open
+ * and Dismiss buttons. Buttons map to NSModalResponse codes by add order
+ * (First=1000, Second=1001, …), which we translate back to an option index.
+ * @returns {{result: string, index?: number, label?: string, meta: object}}
+ */
+function showOptionsOsascript(o, run, bin) {
+  const bodyTmp = writeTempFile(o.body)
+  if (!bodyTmp) return { result: 'unavailable', meta: { reason: 'tmpfile-write-failed' } }
+
+  const heading = asLiteral(o.heading)
+  const optButtons = o.options
+    .map(label => `(a's addButtonWithTitle:"${asLiteral(truncateLabel(label, 60))}")`)
+    .join('\n')
+  const openIdx = o.options.length // add-order index of the Open button
+
+  // Read the body via NSString, not StandardAdditions `read (POSIX file …)`:
+  // once `use framework "Foundation"` is active, that form throws -1700 ("Can't
+  // make current application into type file") and aborts the dialog.
+  const script = `
+use framework "Foundation"
+use framework "AppKit"
+set theApp to current application
+set bodyText to ((theApp's NSString's stringWithContentsOfFile:"${asLiteral(bodyTmp.file)}" encoding:(theApp's NSUTF8StringEncoding) |error|:(missing value)) as text)
+set a to theApp's NSAlert's alloc()'s init()
+a's setMessageText:"${heading}"
+a's setInformativeText:bodyText
+${optButtons}
+(a's addButtonWithTitle:"${asLiteral(o.openLabel)}")
+(a's addButtonWithTitle:"${asLiteral(o.dismissLabel)}")
+${macSoundObjC()}
+theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+set btn to a's runModal()
+return (btn as text)
+`
+
+  const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
+  bodyTmp.cleanup()
+
+  const rawOut = (result.stdout || '').trim()
+  const rc = parseInt(rawOut, 10)
+  const meta = {
+    tool: 'osascript',
+    status: result.status,
+    rc: Number.isNaN(rc) ? null : rc,
+    stdout: rawOut,
+    stderr: (result.stderr || '').trim(),
+  }
+
+  if (spawnFailed(result)) return { result: 'unavailable', meta: { ...meta, reason: 'osascript-unavailable' } }
+  if (result.status !== 0) return { result: 'dismiss', meta: { ...meta, reason: 'cancelled' } }
+
+  const idx = rc - 1000 // 0-based button index, in add order
+  if (idx >= 0 && idx < o.options.length) return { result: 'option', index: idx, label: o.options[idx], meta }
+  if (idx === openIdx) return { result: 'open', meta }
+  return { result: 'dismiss', meta }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -279,6 +418,7 @@ tv's setAutomaticQuoteSubstitutionEnabled:false
 sv's setDocumentView:tv
 a's setAccessoryView:sv
 a's window's setInitialFirstResponder:tv
+${macSoundObjC()}
 theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
 set btn to a's runModal()
 if btn is (theApp's NSAlertFirstButtonReturn) then
@@ -415,29 +555,93 @@ export function showChoiceDialog(opts, deps = {}) {
   }
 }
 
-/** macOS — AppleScript `choose from list`. */
+/**
+ * macOS — an NSAlert whose accessory is a bordered, scrollable list of option
+ * rows: radio buttons for single-select, checkboxes for multi-select, with a
+ * hairline divider between each row so every option has a visible boundary
+ * (the native `choose from list` shows no row separators until you click).
+ * Returns the checked option labels (newline-joined) or a cancel sentinel — the
+ * same stdout contract the caller already parses.
+ *
+ * Button-type / box-type constants are passed as integers because the enum
+ * names aren't reliably exposed to AppleScriptObjC:
+ *   NSButtonTypeRadio = 4, NSButtonTypeSwitch = 3, NSBoxSeparator = 2.
+ */
 function showChoiceOsascript(o, run, bin) {
-  // Build the list literal from escaped options; the raw labels are what
-  // osascript returns and what callers match against downstream.
-  const items = o.options.map(s => `"${asLiteral(s)}"`).join(', ')
+  // The raw labels are what we return and what callers match against downstream.
+  const titlesList  = o.options.map(s => `"${asLiteral(s)}"`).join(', ')
   const safeTitle   = asLiteral(o.title)
   const safeSend    = asLiteral(o.sendLabel)
   const safeDismiss = asLiteral(o.dismissLabel)
-  const multi = o.multiSelect ? 'true' : 'false'
+  const buttonType  = o.multiSelect ? 3 : 4 // switch (checkbox) : radio
+  // Single-select needs explicit exclusivity: NSButton radios don't auto-group
+  // in AppleScriptObjC, so each radio targets a handler that clears its siblings.
+  const radioWiring = o.multiSelect ? '' : `
+  (b's setTarget:me)
+  (b's setAction:"radioPicked:")`
 
   const tmp = writeTempFile(o.body)
   if (!tmp) return { result: 'unavailable', selected: [], meta: { reason: 'tmpfile-write-failed' } }
 
   const script = `
-set f to open for access POSIX file "${asLiteral(tmp.file)}"
-set msg to read f as «class utf8»
-close access f
-set AppleScript's text item delimiters to linefeed
-set chosen to choose from list {${items}} with title "${safeTitle}" with prompt msg OK button name "${safeSend}" cancel button name "${safeDismiss}" multiple selections allowed ${multi}
-if chosen is false then
+use framework "Foundation"
+use framework "AppKit"
+global btns
+set theApp to current application
+set bodyText to ((theApp's NSString's stringWithContentsOfFile:"${asLiteral(tmp.file)}" encoding:(theApp's NSUTF8StringEncoding) |error|:(missing value)) as text)
+set optTitles to {${titlesList}}
+set n to (count of optTitles)
+set rowH to 32
+set w to 460
+set totalH to n * rowH
+set container to theApp's NSView's alloc()'s initWithFrame:(theApp's NSMakeRect(0, 0, w, totalH))
+set btns to {}
+repeat with i from 1 to n
+  set topY to totalH - (i * rowH)
+  set b to theApp's NSButton's alloc()'s initWithFrame:(theApp's NSMakeRect(14, topY + 4, w - 28, rowH - 8))
+  (b's setButtonType:${buttonType})
+  (b's setTitle:(item i of optTitles))
+  (b's setFont:(theApp's NSFont's systemFontOfSize:13))${radioWiring}
+  (container's addSubview:b)
+  set end of btns to b
+  if i < n then
+    set sep to theApp's NSBox's alloc()'s initWithFrame:(theApp's NSMakeRect(8, topY, w - 16, 1))
+    (sep's setBoxType:2)
+    (container's addSubview:sep)
+  end if
+end repeat
+set visH to totalH
+if visH > 300 then set visH to 300
+set sv to theApp's NSScrollView's alloc()'s initWithFrame:(theApp's NSMakeRect(0, 0, w, visH))
+(sv's setHasVerticalScroller:true)
+(sv's setBorderType:(theApp's NSBezelBorder))
+(sv's setDrawsBackground:false)
+(sv's setDocumentView:container)
+set a to theApp's NSAlert's alloc()'s init()
+a's setMessageText:"${safeTitle}"
+a's setInformativeText:bodyText
+a's setAccessoryView:sv
+(a's addButtonWithTitle:"${safeSend}")
+(a's addButtonWithTitle:"${safeDismiss}")
+${macSoundObjC()}
+theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+set btn to a's runModal()
+if btn is not (theApp's NSAlertFirstButtonReturn) then
   return "${MAC_CANCEL_SENTINEL}"
 end if
-return chosen as text
+set chosen to {}
+repeat with b in btns
+  if ((b's state()) as integer) is 1 then set end of chosen to (b's title() as text)
+end repeat
+set AppleScript's text item delimiters to linefeed
+return (chosen as text)
+
+on radioPicked:sender
+  global btns
+  repeat with bb in btns
+    if ((bb's isEqual:sender) as boolean) is false then (bb's setState:0)
+  end repeat
+end radioPicked:
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
