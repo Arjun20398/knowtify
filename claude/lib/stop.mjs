@@ -3,6 +3,8 @@ import path from 'path'
 import { showDialog, showOptionsDialog, showNotification } from '../../core/dialog.mjs'
 import { isHostAppFrontmost, focusHostApp } from '../../core/focus.mjs'
 import { createLogger } from '../../core/logger.mjs'
+import { getConfig } from '../../core/config.mjs'
+import { withTip } from './tips.mjs'
 
 const defaultLog = createLogger('claude')
 
@@ -11,26 +13,42 @@ const defaultLog = createLogger('claude')
 // ──────────────────────────────────────────────────────────
 
 /**
- * Read the last assistant text message from a Claude Code transcript (JSONL).
+ * Read + parse a Claude Code transcript (JSONL) a single time → parsed entries
+ * (unparseable lines dropped). Both the last-message and turn-duration
+ * extractors below work off this one snapshot, so the Stop hook reads the file
+ * once per invocation instead of twice.
  * @param {string} transcriptPath
  * @param {{ readFileSync?: typeof fs.readFileSync, existsSync?: typeof fs.existsSync }} [io]
- * @returns {string}
+ * @returns {Array<Record<string, any>>}
  */
-export function readLastAssistantMessage(transcriptPath, io = {}) {
+export function readTranscriptEntries(transcriptPath, io = {}) {
   const exists = io.existsSync ?? fs.existsSync
   const read = io.readFileSync ?? fs.readFileSync
-  if (!transcriptPath || !exists(transcriptPath)) return ''
+  if (!transcriptPath || !exists(transcriptPath)) return []
 
-  let lines
+  let raw
   try {
-    lines = read(transcriptPath, 'utf8').split('\n').filter(Boolean)
+    raw = read(transcriptPath, 'utf8')
   } catch {
-    return ''
+    return []
   }
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    let entry
-    try { entry = JSON.parse(lines[i]) } catch { continue }
+  const entries = []
+  for (const line of raw.split('\n')) {
+    if (!line) continue
+    try { entries.push(JSON.parse(line)) } catch { /* skip malformed line */ }
+  }
+  return entries
+}
+
+/**
+ * Last assistant text message from already-parsed transcript entries.
+ * @param {Array<Record<string, any>>} entries
+ * @returns {string}
+ */
+function lastAssistantMessageFromEntries(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i]
     if (entry?.type !== 'assistant') continue
     const content = entry?.message?.content
     if (!Array.isArray(content)) continue
@@ -42,6 +60,16 @@ export function readLastAssistantMessage(transcriptPath, io = {}) {
     if (text) return text
   }
   return ''
+}
+
+/**
+ * Read the last assistant text message from a Claude Code transcript (JSONL).
+ * @param {string} transcriptPath
+ * @param {{ readFileSync?: typeof fs.readFileSync, existsSync?: typeof fs.existsSync }} [io]
+ * @returns {string}
+ */
+export function readLastAssistantMessage(transcriptPath, io = {}) {
+  return lastAssistantMessageFromEntries(readTranscriptEntries(transcriptPath, io))
 }
 
 /**
@@ -85,33 +113,21 @@ export function looksLikeQuestion(message) {
  *
  * @returns {number | null} milliseconds, or null if it can't be determined
  */
-export function readTurnDurationMs(transcriptPath, io = {}) {
-  const exists = io.existsSync ?? fs.existsSync
-  const read = io.readFileSync ?? fs.readFileSync
-  if (!transcriptPath || !exists(transcriptPath)) return null
-
-  let lines
-  try {
-    lines = read(transcriptPath, 'utf8').split('\n').filter(Boolean)
-  } catch {
-    return null
-  }
-
-  const parse = (line) => { try { return JSON.parse(line) } catch { return null } }
+function turnDurationFromEntries(entries) {
   const isMain = (e) => Boolean(e) && e.isSidechain !== true
 
   // End = the final assistant message of the turn.
   let endTs = null
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const e = parse(lines[i])
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
     if (isMain(e) && e.type === 'assistant' && e.timestamp) { endTs = Date.parse(e.timestamp); break }
   }
   if (!endTs) return null
 
   // Start = the human prompt that began the turn (skip tool_result "user" entries).
   let startTs = null
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const e = parse(lines[i])
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
     if (!isMain(e) || e.type !== 'user' || !e.timestamp) continue
     const content = e?.message?.content
     const isToolResult = Array.isArray(content) && content.some(c => c?.type === 'tool_result')
@@ -123,6 +139,46 @@ export function readTurnDurationMs(transcriptPath, io = {}) {
 
   const ms = endTs - startTs
   return Number.isFinite(ms) && ms >= 0 ? ms : null
+}
+
+export function readTurnDurationMs(transcriptPath, io = {}) {
+  return turnDurationFromEntries(readTranscriptEntries(transcriptPath, io))
+}
+
+/**
+ * The human prompt that started this turn, from already-parsed entries: the most
+ * recent main-thread `user` entry that's an actual prompt (not a tool_result).
+ * Used to label notifications so you can tell which terminal is asking.
+ * @param {Array<Record<string, any>>} entries
+ * @returns {string}
+ */
+function lastUserPromptFromEntries(entries) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]
+    if (!e || e.isSidechain === true || e.type !== 'user') continue
+    const content = e?.message?.content
+    if (typeof content === 'string') {
+      const t = content.trim()
+      if (t) return t
+      continue
+    }
+    if (Array.isArray(content)) {
+      if (content.some(c => c?.type === 'tool_result')) continue // tool output, not a prompt
+      const t = content
+        .filter(c => c && c.type === 'text' && typeof c.text === 'string')
+        .map(c => c.text)
+        .join('\n')
+        .trim()
+      if (t) return t
+    }
+  }
+  return ''
+}
+
+/** First non-empty line of `text`, trimmed and capped (ellipsis if truncated). */
+export function firstLine(text, max = 100) {
+  const line = String(text || '').split('\n').map(s => s.trim()).find(Boolean) || ''
+  return line.length > max ? line.slice(0, max - 1).trimEnd() + '…' : line
 }
 
 /** Humanize a millisecond duration: "20s", "1m 5s", "2h 3m". */
@@ -196,8 +252,11 @@ export function parseOptions(message) {
  *   showNotification?: typeof showNotification,
  *   focusHostApp?: typeof focusHostApp,
  *   isHostAppFrontmost?: typeof isHostAppFrontmost,
+ *   readTranscriptEntries?: (p: string) => Array<Record<string, any>>,
  *   readTranscript?: (p: string) => string,
  *   readDurationMs?: (p: string) => number | null,
+ *   readUserPrompt?: () => string,
+ *   config?: import('../../core/config.mjs').Config,
  *   log?: (level: string, msg: string, extra?: unknown) => void,
  * }} [deps]
  * @returns {{ decision: 'block', reason: string } | null}
@@ -208,11 +267,20 @@ export function handleStop(input, deps = {}) {
   const notify = deps.showNotification ?? showNotification
   const focus = deps.focusHostApp ?? focusHostApp
   const frontmost = deps.isHostAppFrontmost ?? isHostAppFrontmost
-  const readTranscript = deps.readTranscript ?? ((p) => readLastAssistantMessage(p))
-  const readDurationMs = deps.readDurationMs ?? ((p) => readTurnDurationMs(p))
+  const config = deps.config ?? getConfig()
   const log = deps.log ?? defaultLog
 
   const transcriptPath = String(input.transcript_path || '')
+
+  // Read + parse the transcript at most once per invocation (lazily, only if we
+  // get past the frontmost check), then derive both the last message and the
+  // turn duration from the same snapshot. Explicit deps still override for tests.
+  const readEntries = deps.readTranscriptEntries ?? ((p) => readTranscriptEntries(p))
+  let entriesCache
+  const entries = () => (entriesCache ??= readEntries(transcriptPath))
+  const readTranscript = deps.readTranscript ?? (() => lastAssistantMessageFromEntries(entries()))
+  const readDurationMs = deps.readDurationMs ?? (() => turnDurationFromEntries(entries()))
+  const readUserPrompt = deps.readUserPrompt ?? (() => firstLine(lastUserPromptFromEntries(entries())))
   const project = path.basename(String(input.cwd || path.dirname(transcriptPath) || 'unknown'))
 
   log('info', 'stop hook invoked', {
@@ -221,23 +289,63 @@ export function handleStop(input, deps = {}) {
     transcript_path: transcriptPath,
   })
 
-  if (frontmost()) {
+  // 'always' opts out of focus-suppression entirely (the only way to hear about
+  // a Claude finishing in a background terminal *tab* of the focused window —
+  // tabs can't be told apart from the foreground one).
+  const isFront = frontmost()
+  if (config.notifyWhen !== 'always' && isFront) {
     log('info', 'claude window frontmost, skipping')
     return null
   }
 
+  // When you're focused on this very window (only reachable in 'always' mode), a
+  // blocking modal would interrupt what you're doing — downgrade to a
+  // non-blocking banner. When you're away, honor the configured style so the
+  // dialog (and its clickable choices) still appears.
+  const effectiveStyle = isFront ? 'notify' : config.style
+
   const message = readTranscript(transcriptPath)
+
+  // The first line of the user's prompt, used as the banner body so you can tell
+  // which terminal a notification came from when several are running. Falls back
+  // to the project name when there's no prompt to show (keeps the body non-empty,
+  // which macOS requires to render the banner at all).
+  const promptLine = readUserPrompt()
+  const bannerBody = promptLine || project
+
   if (!looksLikeQuestion(message)) {
     // Claude finished without needing input → tiny "✻ Clauding for 20s" banner
     // with a pleasant chime, not a modal dialog.
     const label = completionLabel(readDurationMs(transcriptPath))
     log('info', 'completion notification', { project, label })
-    notify({ title: label, message: project, sound: 'Glass' })
+    notify({ title: label, subtitle: project, message: bannerBody, sound: 'Glass' })
     return null
   }
 
   // Log only metadata, never the message text — it can contain secrets.
   log('info', 'showing reply prompt', { project, messageChars: message.length })
+
+  // Fire a banner instead of a blocking dialog and defer to the in-terminal
+  // prompt (don't steal focus — that would defeat the point). The body carries
+  // the user's prompt line so you can tell which terminal is waiting. Title is
+  // generic when you're focused (the question heuristic can fire on rhetorical
+  // lines too); the explicit "waiting" wording is used when you're away. If no
+  // notify backend is available the banner can't be shown and there's no
+  // terminal fallback for a Stop nudge, so we fall through to the dialog.
+  if (effectiveStyle === 'notify') {
+    const banner = {
+      title: isFront ? 'Claude needs your attention' : 'Claude is waiting for your input',
+      subtitle: project,
+      message: bannerBody,
+      sound: 'Glass',
+    }
+    const shown = notify(banner)
+    if (shown) {
+      log('info', 'notify banner instead of reply dialog', { project, focused: isFront })
+      return null
+    }
+    log('warn', 'notify mode but no banner backend; falling back to dialog', { project })
+  }
 
   // If Claude listed enumerated choices, render a button per option. Picking one
   // injects it back so Claude answers itself; Open Claude / Dismiss still apply.
@@ -246,7 +354,7 @@ export function handleStop(input, deps = {}) {
     const picked = showOptions({
       title: `Knowtify · Claude — ${project}`,
       heading: 'Claude is waiting for your reply',
-      body: parsed.question || forDisplay(message),
+      body: withTip(parsed.question || forDisplay(message)),
       options: parsed.options,
       openLabel: 'Open Claude',
       dismissLabel: 'Dismiss',
@@ -272,7 +380,7 @@ export function handleStop(input, deps = {}) {
   // Claude window so the user replies there.
   const { result } = show({
     title: `Knowtify · Claude — ${project}`,
-    body: `Claude is waiting for your reply:\n\n${forDisplay(message)}`,
+    body: withTip(`Claude is waiting for your reply:\n\n${forDisplay(message)}`),
     allowLabel: 'Open Claude',
     denyLabel: 'Dismiss',
   })

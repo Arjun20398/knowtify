@@ -276,16 +276,21 @@ test('showChoiceDialog osascript: plays a subtle popup sound (NSSound)', () => {
 test('showNotification: no backend → false', () => {
   assert.equal(showNotification({ title: 'T', message: 'M' }, { platform: HEADLESS, run: () => { throw new Error('nope') } }), false)
 })
-test('showNotification osascript: dispatched with default sound → true', () => {
+test('showNotification osascript: dispatched, plays cue at half volume (not full-volume sound name)', () => {
   let seenArgs
   const r = showNotification({ title: 'T', message: 'M' }, { platform: MAC, run: (_b, args) => { seenArgs = args; return ok() } })
   assert.equal(r, true)
-  assert.match(seenArgs.join(' '), /display notification "M" with title "T".*sound name "Glass"/)
+  const joined = seenArgs.join(' ')
+  assert.match(joined, /display notification "M" with title "T"/)
+  assert.match(joined, /afplay -v 0\.5 .*Glass\.aiff/)
+  assert.doesNotMatch(joined, /sound name/)
 })
-test('showNotification osascript: sound null → silent (no sound name)', () => {
+test('showNotification osascript: sound null → silent (no sound, no afplay)', () => {
   let seenArgs
   showNotification({ title: 'T', message: 'M', sound: null }, { platform: MAC, run: (_b, args) => { seenArgs = args; return ok() } })
-  assert.doesNotMatch(seenArgs.join(' '), /sound name/)
+  const joined = seenArgs.join(' ')
+  assert.doesNotMatch(joined, /sound name/)
+  assert.doesNotMatch(joined, /afplay/)
 })
 test('showNotification notify-send: passes title + message (+ sound hint)', () => {
   let seen
@@ -319,6 +324,25 @@ test('isHostAppFrontmost xdotool: active window not an ancestor → false', () =
 test('isHostAppFrontmost xdotool: failure → false', () => {
   const run = () => ({ status: 1, stdout: '' })
   assert.equal(isHostAppFrontmost({ platform: ZENITY, run }), false)
+})
+
+test('isHostAppFrontmost osascript: front app matches an ancestor → true', () => {
+  // Single ps snapshot maps our parent pid to a comm that contains the app name.
+  const run = (bin) => {
+    if (bin === 'ps') return { status: 0, stdout: `${process.ppid} 1 /Applications/iTerm.app/Contents/MacOS/iTerm2\n` }
+    if (bin.endsWith('osascript')) return { status: 0, stdout: 'Macintosh HD:Applications:iTerm.app:\n' }
+    return { status: 1, stdout: '' }
+  }
+  assert.equal(isHostAppFrontmost({ platform: MAC, run }), true)
+})
+
+test('isHostAppFrontmost osascript: front app not an ancestor → false', () => {
+  const run = (bin) => {
+    if (bin === 'ps') return { status: 0, stdout: `${process.ppid} 1 /bin/zsh\n` }
+    if (bin.endsWith('osascript')) return { status: 0, stdout: 'Macintosh HD:Applications:Safari.app:\n' }
+    return { status: 1, stdout: '' }
+  }
+  assert.equal(isHostAppFrontmost({ platform: MAC, run }), false)
 })
 
 // ── focusHostApp ──

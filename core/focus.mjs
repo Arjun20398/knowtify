@@ -23,23 +23,51 @@ export function isHostAppFrontmost(deps = {}) {
 }
 
 /**
- * Collect our ancestor process pids (parent, grandparent, …) up to `max` levels,
- * stopping at init. Shared by focus detection and window activation.
- * @returns {number[]} closest ancestor first
+ * Snapshot the whole process table in a single `ps` call →
+ * Map<pid, { ppid, comm }>. This replaces walking the tree one `ps` spawn per
+ * ancestor level, which was the dominant latency on the (common) path where the
+ * host app is NOT frontmost and we go on to notify — there the walk runs its
+ * full length because nothing matches.
+ * @returns {Map<number, { ppid: number, comm: string }>}
  */
-function ancestorPids(run, max = 12) {
+function processTable(run) {
+  const table = new Map()
+  const r = run('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8', timeout: 3000 })
+  if (r.status !== 0) return table
+  for (const line of (r.stdout || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+    if (!m) continue
+    table.set(parseInt(m[1], 10), { ppid: parseInt(m[2], 10), comm: m[3].toLowerCase() })
+  }
+  return table
+}
+
+/**
+ * Walk our ancestor pids (closest first) in memory from a process-table
+ * snapshot, stopping at init or `max` levels.
+ * @returns {number[]}
+ */
+function ancestorPidsFrom(table, startPid = process.ppid, max = 20) {
   const pids = []
-  let pid = process.ppid
+  let pid = startPid
   for (let i = 0; i < max; i++) {
     if (!pid || pid <= 1) break
     pids.push(pid)
-    const ps = run('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf8', timeout: 2000 })
-    if (ps.status !== 0) break
-    const ppid = parseInt((ps.stdout || '').trim(), 10)
-    if (!ppid) break
-    pid = ppid
+    const entry = table.get(pid)
+    if (!entry) break
+    pid = entry.ppid
   }
   return pids
+}
+
+/**
+ * Collect our ancestor process pids (parent, grandparent, …) up to `max` levels,
+ * stopping at init. Shared by focus detection and window activation. One `ps`
+ * snapshot, walked in memory.
+ * @returns {number[]} closest ancestor first
+ */
+function ancestorPids(run, max = 12) {
+  return ancestorPidsFrom(processTable(run), process.ppid, max)
 }
 
 /**
@@ -128,19 +156,15 @@ function frontmostOsascript(run, bin) {
   if (!frontMatch) return false
   const frontAppName = frontMatch[1] // e.g. "intellij idea ce", "iterm", "warp"
 
+  // One ps snapshot, then compare each ancestor's command against the front app.
+  const table = processTable(run)
   let pid = process.ppid
   for (let i = 0; i < 10; i++) {
-    const ps = run('ps', ['-p', String(pid), '-o', 'ppid=,comm='], {
-      encoding: 'utf8', timeout: 2000,
-    })
-    if (ps.status !== 0) break
-    const parts = ps.stdout.trim().split(/\s+/)
-    if (parts.length < 2) break
-    const ppid = parseInt(parts[0], 10)
-    const comm = parts.slice(1).join(' ').toLowerCase()
-    if (comm.includes(frontAppName) || frontAppName.includes(comm)) return true
-    if (ppid <= 1) break
-    pid = ppid
+    const entry = table.get(pid)
+    if (!entry) break
+    if (entry.comm.includes(frontAppName) || frontAppName.includes(entry.comm)) return true
+    if (entry.ppid <= 1) break
+    pid = entry.ppid
   }
   return false
 }

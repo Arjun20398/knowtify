@@ -1,7 +1,9 @@
 import crypto from 'crypto'
 import path from 'path'
-import { showDialog, showChoiceDialog } from '../../core/dialog.mjs'
+import { showDialog, showChoiceDialog, showNotification } from '../../core/dialog.mjs'
 import { isHostAppFrontmost, focusHostApp } from '../../core/focus.mjs'
+import { getConfig } from '../../core/config.mjs'
+import { withTip, NOTIFY_TIP } from './tips.mjs'
 
 // Synthetic choice for "none of these — I want to type my own answer". Picking
 // it hands the question back to Claude's own window (we don't capture free text
@@ -111,8 +113,10 @@ export function buildHookOutput(prompt, action) {
  * @param {{
  *   showDialog?: typeof showDialog,
  *   showChoiceDialog?: typeof showChoiceDialog,
+ *   showNotification?: typeof showNotification,
  *   focusHostApp?: typeof focusHostApp,
  *   isHostAppFrontmost?: typeof isHostAppFrontmost,
+ *   config?: import('../../core/config.mjs').Config,
  * }} [deps]
  * @returns {Promise<object | null>} hook output, or null to defer to Claude
  */
@@ -125,15 +129,35 @@ export async function handlePermissionRequest(input, deps = {}) {
 
   const show = deps.showDialog ?? showDialog
   const frontmost = deps.isHostAppFrontmost ?? isHostAppFrontmost
+  const config = deps.config ?? getConfig()
 
-  if (frontmost()) return null
+  // 'always' notifies even when the host app is frontmost (e.g. a background
+  // terminal tab in the same window); 'unfocused' (default) stays quiet then.
+  const isFront = frontmost()
+  if (config.notifyWhen !== 'always' && isFront) return null
+
+  // Notify mode (or focused, where a modal would interrupt you): a banner can't
+  // carry an Allow/Deny action, so we can't approve from it. Announce that
+  // Claude needs a decision and defer to the in-terminal permission prompt (same
+  // outcome as having no GUI backend — never auto-deny). When focused we drop
+  // the cross-promo tip — there's no dialog to switch to when you're right here.
+  if (isFront || config.style === 'notify') {
+    const notify = deps.showNotification ?? showNotification
+    const project = path.basename(String(input.cwd || 'unknown'))
+    // Non-empty body required for macOS to render the banner (the tip is dropped
+    // when focused, so the project name is the body instead).
+    notify(isFront
+      ? { title: 'Claude needs your permission', message: project, sound: 'Glass' }
+      : { title: 'Claude needs your permission', subtitle: project, message: NOTIFY_TIP, sound: 'Glass' })
+    return null
+  }
 
   const prompt = buildPrompt(input)
   const allowAllChoice = prompt.choices.find(c => c.id === 'yes-all')
 
   const { result } = show({
     title:         'Knowtify · Claude',
-    body:          `Claude wants to run:\n\n${prompt.detail}\n\nProject: ${prompt.project}`,
+    body:          withTip(`Claude wants to run:\n\n${prompt.detail}\n\nProject: ${prompt.project}`),
     allowLabel:    'Yes',
     denyLabel:     'No',
     allowAllLabel: allowAllChoice?.label || 'Allow All',
@@ -192,7 +216,7 @@ export function collectAnswers(questions, io) {
 
     const { result, selected } = io.showChoiceDialog({
       title: `Knowtify · Claude — ${header}`,
-      body: buildQuestionBody(q),
+      body: withTip(buildQuestionBody(q)),
       options: [...options, OTHER_LABEL],
       multiSelect: Boolean(q.multiSelect),
     })
@@ -217,8 +241,10 @@ export function collectAnswers(questions, io) {
  * @param {Record<string, unknown>} input
  * @param {{
  *   showChoiceDialog?: typeof showChoiceDialog,
+ *   showNotification?: typeof showNotification,
  *   focusHostApp?: typeof focusHostApp,
  *   isHostAppFrontmost?: typeof isHostAppFrontmost,
+ *   config?: import('../../core/config.mjs').Config,
  * }} [deps]
  * @returns {object | null}
  */
@@ -226,14 +252,28 @@ export function handleAskUserQuestion(input, deps = {}) {
   const showChoice = deps.showChoiceDialog ?? showChoiceDialog
   const focus      = deps.focusHostApp ?? focusHostApp
   const frontmost  = deps.isHostAppFrontmost ?? isHostAppFrontmost
+  const config     = deps.config ?? getConfig()
 
-  if (frontmost()) return null
+  const isFront = frontmost()
+  if (config.notifyWhen !== 'always' && isFront) return null
 
   const toolInput = /** @type {Record<string, unknown>} */ (input.tool_input || {})
   const questions = Array.isArray(toolInput.questions) ? toolInput.questions : []
   if (!questions.length) return null
 
   const header = path.basename(String(input.cwd || 'unknown'))
+
+  // Notify mode (or focused, where a choice modal would interrupt you): skip the
+  // choice dialog, fire a banner, and let Claude's own picker handle it inline.
+  // When focused, keep it plain — generic title, no cross-promo tip.
+  if (isFront || config.style === 'notify') {
+    const notify = deps.showNotification ?? showNotification
+    notify(isFront
+      ? { title: 'Claude needs your attention', message: header, sound: 'Glass' }
+      : { title: 'Claude is waiting for your input', subtitle: header, message: NOTIFY_TIP, sound: 'Glass' })
+    return null
+  }
+
   const answers = collectAnswers(questions, { showChoiceDialog: showChoice, header })
   if (!answers) {
     // Dismissed, no GUI, or "Other" → let Claude's own picker handle it and jump

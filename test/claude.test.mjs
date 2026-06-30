@@ -6,8 +6,16 @@ import {
 } from '../claude/lib/permission-request.mjs'
 import {
   looksLikeQuestion, readLastAssistantMessage, forDisplay, handleStop,
-  formatDuration, completionLabel, readTurnDurationMs, parseOptions,
+  formatDuration, completionLabel, readTurnDurationMs, parseOptions, firstLine,
 } from '../claude/lib/stop.mjs'
+import { DIALOG_TIP, NOTIFY_TIP } from '../claude/lib/tips.mjs'
+
+// The orchestrators resolve their style via getConfig(), which reads the real
+// ~/.knowtify/config.json. Pin a deterministic default here so these tests never
+// depend on the developer's machine setting; notify-mode tests override it via
+// an injected `config` dep (env takes precedence over the file in getConfig).
+process.env.KNOWTIFY_STYLE = 'dialog'
+process.env.KNOWTIFY_NOTIFY_WHEN = 'unfocused'
 
 // ── permission: pure ──
 test('buildRequestId: stable + format', () => {
@@ -54,6 +62,31 @@ test('handlePermissionRequest: frontmost → null (defers)', async () => {
   const out = await handlePermissionRequest(baseInput, { isHostAppFrontmost: () => true, showDialog: () => { throw new Error('should not show') } })
   assert.equal(out, null)
 })
+test('handlePermissionRequest: notifyWhen=always → alerts even when frontmost', async () => {
+  let note
+  const out = await handlePermissionRequest(baseInput, {
+    isHostAppFrontmost: () => true, // would normally defer
+    config: { style: 'notify', notifyWhen: 'always' },
+    showDialog: () => { throw new Error('should not show dialog in notify mode') },
+    showNotification: (n) => { note = n; return true },
+  })
+  assert.equal(out, null)
+  assert.equal(note.title, 'Claude needs your permission')
+})
+test('handlePermissionRequest: always + frontmost + dialog style → banner, never a modal', async () => {
+  let note, sawDialog = false
+  const out = await handlePermissionRequest(baseInput, {
+    isHostAppFrontmost: () => true,
+    config: { style: 'dialog', notifyWhen: 'always' }, // dialog style, but focused
+    showDialog: () => { sawDialog = true; return { result: 'deny' } },
+    showNotification: (n) => { note = n; return true },
+  })
+  assert.equal(out, null)
+  assert.equal(sawDialog, false)
+  assert.equal(note.title, 'Claude needs your permission')
+  assert.equal(note.message, 'foo')         // project as body (non-empty so macOS shows it)
+  assert.notEqual(note.message, NOTIFY_TIP) // no cross-promo tip in the same window
+})
 test('handlePermissionRequest: allow → yes output', async () => {
   const out = await handlePermissionRequest(baseInput, { isHostAppFrontmost: () => false, showDialog: () => ({ result: 'allow', meta: {} }) })
   assert.equal(out.hookSpecificOutput.decision.behavior, 'allow')
@@ -69,6 +102,28 @@ test('handlePermissionRequest: allow-all → updatedPermissions', async () => {
 test('handlePermissionRequest: no GUI (unavailable) → null (defers, never denies)', async () => {
   const out = await handlePermissionRequest(baseInput, { isHostAppFrontmost: () => false, showDialog: () => ({ result: 'unavailable', meta: {} }) })
   assert.equal(out, null)
+})
+test('handlePermissionRequest: notify mode → banner + null (no dialog, defers)', async () => {
+  let note
+  const out = await handlePermissionRequest(baseInput, {
+    isHostAppFrontmost: () => false,
+    config: { style: 'notify' },
+    showDialog: () => { throw new Error('should not show dialog in notify mode') },
+    showNotification: (n) => { note = n; return true },
+  })
+  assert.equal(out, null)
+  assert.match(note.title, /permission/i)
+  assert.equal(note.subtitle, 'foo')
+  assert.equal(note.message, NOTIFY_TIP)
+})
+test('handlePermissionRequest: dialog body carries the notify tip', async () => {
+  let body
+  await handlePermissionRequest(baseInput, {
+    isHostAppFrontmost: () => false,
+    config: { style: 'dialog' },
+    showDialog: (opts) => { body = opts.body; return { result: 'allow', meta: {} } },
+  })
+  assert.ok(body.includes(DIALOG_TIP), 'permission dialog body should include the tip')
 })
 
 // ── AskUserQuestion ──
@@ -130,6 +185,19 @@ test('handleAskUserQuestion: dismissed → focuses + null', () => {
   assert.equal(out, null)
   assert.equal(focused, true)
 })
+test('handleAskUserQuestion: notify mode → banner + null (no choice dialog)', () => {
+  let note
+  const out = handleAskUserQuestion(askInput, {
+    isHostAppFrontmost: () => false,
+    config: { style: 'notify' },
+    showChoiceDialog: () => { throw new Error('should not show dialog in notify mode') },
+    showNotification: (n) => { note = n; return true },
+  })
+  assert.equal(out, null)
+  assert.equal(note.title, 'Claude is waiting for your input')
+  assert.equal(note.subtitle, 'foo')
+  assert.equal(note.message, NOTIFY_TIP)
+})
 test('handleAskUserQuestion: Other → focuses Claude window + null (defers)', () => {
   let focused = false
   const out = handleAskUserQuestion(askInput, {
@@ -187,6 +255,93 @@ test('handleStop: frontmost → null (no notification)', () => {
   const out = handleStop(stopInput, { isHostAppFrontmost: () => true, showNotification: () => { notified = true; return true }, log: () => {} })
   assert.equal(out, null)
   assert.equal(notified, false)
+})
+test('handleStop: notifyWhen=always → still notifies even when frontmost', () => {
+  let note
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: () => true, // would normally suppress
+    config: { style: 'notify', notifyWhen: 'always' },
+    readTranscript: () => 'All done.',
+    readDurationMs: () => 20_000,
+    showNotification: (n) => { note = n; return true },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(note.title, '✻ Clauding for 20s')
+})
+test('handleStop: always + frontmost + dialog style + question → banner, never a modal', () => {
+  let note, sawDialog = false
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: () => true,
+    config: { style: 'dialog', notifyWhen: 'always' }, // dialog style, but focused
+    readTranscript: () => 'Which option do you prefer?',
+    readDurationMs: () => 1000,
+    showNotification: (n) => { note = n; return true },
+    showDialog: () => { sawDialog = true; return { result: 'deny' } },
+    showOptionsDialog: () => { sawDialog = true; return { result: 'unavailable' } },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(sawDialog, false)
+  assert.equal(note.title, 'Claude needs your attention') // generic, not "waiting for input"
+  assert.equal(note.message, 'foo')                       // project as body (non-empty so macOS shows it)
+  assert.notEqual(note.message, NOTIFY_TIP)               // no cross-promo tip in the same window
+})
+test('firstLine: first non-empty line, trimmed + capped', () => {
+  assert.equal(firstLine('  hello world  \nsecond'), 'hello world')
+  assert.equal(firstLine('\n\n  fix the bug\nmore'), 'fix the bug')
+  assert.equal(firstLine(''), '')
+  assert.equal(firstLine('x'.repeat(120), 10), 'xxxxxxxxx…') // 9 chars + ellipsis
+})
+test('handleStop: banner body carries the first line of the user prompt', () => {
+  let note
+  const entries = [
+    { type: 'user', timestamp: '2026-06-18T10:00:00.000Z', message: { content: 'Refactor the auth module\n(second line)' } },
+    { type: 'assistant', timestamp: '2026-06-18T10:00:20.000Z', message: { content: [{ type: 'text', text: 'All done.' }] } },
+  ]
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: () => false,
+    config: { style: 'notify', notifyWhen: 'always' },
+    readTranscriptEntries: () => entries, // drives both message + prompt off one snapshot
+    readDurationMs: () => 1000,
+    showNotification: (n) => { note = n; return true },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(note.subtitle, 'foo')                  // project
+  assert.equal(note.message, 'Refactor the auth module') // first line of the prompt
+})
+test('handleStop: question banner body is the user prompt line', () => {
+  let note
+  const entries = [
+    { type: 'user', timestamp: '2026-06-18T10:00:00.000Z', message: { content: [{ type: 'text', text: 'Set up CI' }] } },
+    { type: 'assistant', timestamp: '2026-06-18T10:00:20.000Z', message: { content: [{ type: 'text', text: 'Which provider do you prefer?' }] } },
+  ]
+  handleStop(stopInput, {
+    isHostAppFrontmost: () => true, // focused → banner
+    config: { style: 'dialog', notifyWhen: 'always' },
+    readTranscriptEntries: () => entries,
+    readDurationMs: () => 1000,
+    showNotification: (n) => { note = n; return true },
+    showDialog: () => { throw new Error('should not show a dialog when focused') },
+    showOptionsDialog: () => { throw new Error('should not show options when focused') },
+    log: () => {},
+  })
+  assert.equal(note.title, 'Claude needs your attention')
+  assert.equal(note.message, 'Set up CI')
+})
+test('handleStop: away + dialog style + question → dialog (focus picks channel)', () => {
+  let sawDialog = false
+  handleStop(stopInput, {
+    isHostAppFrontmost: () => false, // away → honor dialog style
+    config: { style: 'dialog', notifyWhen: 'always' },
+    readTranscript: () => 'Which option do you prefer?',
+    readDurationMs: () => 1000,
+    showNotification: () => true,
+    showDialog: () => { sawDialog = true; return { result: 'deny' } },
+    log: () => {},
+  })
+  assert.equal(sawDialog, true)
 })
 test('handleStop: not a question → null + fires "✻ Clauding for Ns" banner with sound', () => {
   let note
@@ -247,6 +402,22 @@ test('readTurnDurationMs: falls back to timestamps (last user prompt → last as
 test('readTurnDurationMs: missing file → null', () => {
   assert.equal(readTurnDurationMs('/x', { existsSync: () => false }), null)
 })
+test('handleStop: parses the transcript only once though it needs message + duration', () => {
+  let reads = 0
+  const entries = [
+    { type: 'user', timestamp: '2026-06-18T10:00:00.000Z', message: { content: [{ type: 'text', text: 'go' }] } },
+    { type: 'assistant', timestamp: '2026-06-18T10:00:20.000Z', message: { content: [{ type: 'text', text: 'All done.' }] } },
+  ]
+  handleStop({ transcript_path: '/x', cwd: '/p/proj' }, {
+    readTranscriptEntries: () => { reads++; return entries },
+    isHostAppFrontmost: () => false,
+    showNotification: () => true,
+    showDialog: () => ({ result: 'deny' }),
+    config: { style: 'dialog' },
+    log: () => {},
+  })
+  assert.equal(reads, 1)
+})
 test('handleStop: question + "Open Claude" → focuses window, null', () => {
   let focused = false
   const out = handleStop(stopInput, {
@@ -258,6 +429,58 @@ test('handleStop: question + "Open Claude" → focuses window, null', () => {
   })
   assert.equal(out, null)
   assert.equal(focused, true)
+})
+test('handleStop: notify mode + question → waiting banner, no dialog', () => {
+  let note
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => 'Which approach do you prefer?',
+    config: { style: 'notify' },
+    showDialog: () => { throw new Error('should not show dialog in notify mode') },
+    showOptionsDialog: () => { throw new Error('should not show options dialog in notify mode') },
+    showNotification: (n) => { note = n; return true },
+    focusHostApp: () => { throw new Error('should not steal focus in notify mode') },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(note.title, 'Claude is waiting for your input')
+  assert.equal(note.subtitle, 'foo')
+  assert.equal(note.message, 'foo') // body is the user prompt (falls back to project when none)
+})
+test('handleStop: notify mode but no banner backend → falls back to dialog', () => {
+  let usedDialog = false
+  const out = handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => 'Which approach do you prefer?',
+    config: { style: 'notify' },
+    showNotification: () => false, // no notify backend available
+    showDialog: () => { usedDialog = true; return { result: 'deny', meta: {} } },
+    log: () => {},
+  })
+  assert.equal(out, null)
+  assert.equal(usedDialog, true)
+})
+test('handleStop: dialog body carries the notify tip', () => {
+  let body
+  handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => 'Which approach do you prefer?',
+    config: { style: 'dialog' },
+    showDialog: (opts) => { body = opts.body; return { result: 'deny', meta: {} } },
+    log: () => {},
+  })
+  assert.ok(body.includes(DIALOG_TIP), 'stop reply dialog body should include the tip')
+})
+test('handleStop: options dialog body carries the notify tip', () => {
+  let body
+  handleStop(stopInput, {
+    isHostAppFrontmost: notFront,
+    readTranscript: () => optMsg,
+    config: { style: 'dialog' },
+    showOptionsDialog: (opts) => { body = opts.body; return { result: 'dismiss', meta: {} } },
+    log: () => {},
+  })
+  assert.ok(body.includes(DIALOG_TIP), 'stop options dialog body should include the tip')
 })
 test('handleStop: question but dismissed → null, no focus', () => {
   let focused = false

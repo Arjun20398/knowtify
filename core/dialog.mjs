@@ -71,6 +71,11 @@ function spawnFailed(result) {
 const POPUP_SOUND = 'Tink'
 const POPUP_SOUND_VOLUME = 0.25
 
+// Notification banners ring their sound at full system volume via the OS, with
+// no per-call attenuation. So instead of `display notification`'s `sound name`,
+// we play the cue ourselves (afplay) at half volume — a softer nudge.
+const NOTIFY_SOUND_VOLUME = 0.5
+
 /**
  * AppleScriptObjC lines that play the popup sound — for scripts that already
  * `use framework "AppKit"` (NSAlert dialogs). `play()` returns immediately so
@@ -476,28 +481,41 @@ function showInputKdialog(o, run, bin) {
 export function showNotification(opts, deps = {}) {
   const run = deps.run ?? spawnSync
   const cfg = deps.platform ?? getPlatformConfig()
-  const title   = String(opts.title ?? '')
-  const message = String(opts.message ?? '')
-  const sound   = opts.sound === undefined ? 'Glass' : opts.sound
+  const title    = String(opts.title ?? '')
+  const message  = String(opts.message ?? '')
+  const subtitle = opts.subtitle ? String(opts.subtitle) : ''
+  const sound    = opts.sound === undefined ? 'Glass' : opts.sound
+
+  // macOS has a dedicated subtitle field; Linux backends don't, so fold the
+  // subtitle into the body there (newline-joined) rather than dropping it.
+  const linuxBody = [subtitle, message].filter(Boolean).join('\n')
 
   try {
     switch (cfg.notify?.tool) {
       case 'osascript': {
         const t = asLiteral(title)
         const m = asLiteral(message)
-        const sub = opts.subtitle ? ` subtitle "${asLiteral(opts.subtitle)}"` : ''
-        const snd = sound ? ` sound name "${asLiteral(sound)}"` : ''
-        const r = run(cfg.notify.path, ['-e', `display notification "${m}" with title "${t}"${sub}${snd}`], { encoding: 'utf8', timeout: 5000 })
+        const sub = subtitle ? ` subtitle "${asLiteral(subtitle)}"` : ''
+        const eArgs = ['-e', `display notification "${m}" with title "${t}"${sub}`]
+        // Play the cue ourselves at reduced volume (backgrounded with & so it
+        // never delays the banner). For any non-standard sound name we can't map
+        // to a system .aiff, fall back to the OS's full-volume `sound name`.
+        if (sound && /^[A-Za-z]+$/.test(sound)) {
+          eArgs.push('-e', `do shell script "afplay -v ${NOTIFY_SOUND_VOLUME} /System/Library/Sounds/${sound}.aiff >/dev/null 2>&1 &"`)
+        } else if (sound) {
+          eArgs[1] += ` sound name "${asLiteral(sound)}"`
+        }
+        const r = run(cfg.notify.path, eArgs, { encoding: 'utf8', timeout: 5000 })
         return !spawnFailed(r) && r.status === 0
       }
       case 'notify-send': {
-        const args = [title, message]
+        const args = [title, linuxBody]
         if (sound) args.push('-h', 'string:sound-name:complete')
         const r = run(cfg.notify.path, args, { encoding: 'utf8', timeout: 5000 })
         return !spawnFailed(r) && r.status === 0
       }
       case 'zenity': {
-        const r = run(cfg.notify.path, ['--notification', `--text=${title}\n${message}`], { encoding: 'utf8', timeout: 5000 })
+        const r = run(cfg.notify.path, ['--notification', `--text=${[title, linuxBody].filter(Boolean).join('\n')}`], { encoding: 'utf8', timeout: 5000 })
         return !spawnFailed(r) && r.status === 0
       }
       default:

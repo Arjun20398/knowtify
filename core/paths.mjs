@@ -14,6 +14,10 @@ export const LOGS_DIR = path.join(ROOT, 'logs')
 // Install-time snapshot of the detected platform + GUI backends (see platform.mjs).
 export const PLATFORM_CONFIG_PATH = path.join(ROOT, 'platform.json')
 
+// User preferences (see config.mjs). Sibling of platform.json: platform.json is
+// machine-detected facts, config.json is the user's choices.
+export const CONFIG_PATH = path.join(ROOT, 'config.json')
+
 export const ROLLING_LOG_MAX_LINES = 1000
 
 /** Path to a per-channel rolling log, e.g. logPath('claude') → …/logs/claude.log */
