@@ -1,7 +1,7 @@
 {
   "name": "knowtify",
   "description": "Native desktop dialogs for Claude Code — surfaces permission prompts and questions wherever you are, instead of making you switch back to the terminal",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Arjun Singh"
   },
