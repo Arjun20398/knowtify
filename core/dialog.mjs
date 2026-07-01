@@ -3,12 +3,18 @@ import os from 'os'
 import path from 'path'
 import { spawnSync } from 'child_process'
 import { getPlatformConfig } from './platform.mjs'
+import { getAncestorProcs, hostAppNames } from './focus.mjs'
 
 const DEFAULT_DIALOG_TIMEOUT = 300_000          // 5 min
 const DEFAULT_INPUT_TIMEOUT  = 1_800_000        // 30 min — agent parks until you answer
 
 // Marker an AppleScript prints when the user dismisses, distinct from empty input.
 const MAC_CANCEL_SENTINEL = '@@KNOWTIFY_CANCEL@@'
+
+// NSModalResponseAbort — what NSAlert's runModal returns once our auto-dismiss
+// timer calls `abortModal` because the host app (terminal/editor) came back to
+// the foreground. Distinct from any button code (buttons start at 1000).
+const MAC_ABORT_RC = -1000
 
 /** @param {string} s @param {number} max */
 function truncateLabel(s, max) {
@@ -100,6 +106,86 @@ function macSoundShell() {
   return `do shell script "afplay -v ${POPUP_SOUND_VOLUME} /System/Library/Sounds/${POPUP_SOUND}.aiff >/dev/null 2>&1 &"`
 }
 
+/**
+ * AppleScriptObjC fragments that make an NSAlert auto-dismiss itself when the
+ * host app (the terminal/editor running Claude) returns to the foreground — so a
+ * dialog that popped while you were away doesn't linger once you're back at the
+ * window where you'll actually answer.
+ *
+ * Mechanism: a repeating NSTimer added to `NSModalPanelRunLoopMode` (the only
+ * mode that runs while a modal is up) polls `NSWorkspace`'s frontmost app; if it's
+ * the host, it calls `abortModal`, which makes `runModal` return
+ * NSModalResponseAbort (-1000). The caller maps that to a "refocus" outcome —
+ * always a *defer/dismiss*, never a deny.
+ *
+ * Matches the host either by pid (terminals, whose app pid is in our process
+ * tree) or by the frontmost app's display name against our ancestor app-name
+ * tokens (editors like Cursor/VSCode, whose frontmost pid usually isn't an
+ * ancestor). AppleScript's `contains` is case-insensitive by default.
+ *
+ * Requires `theApp` (current application) and `a` (the NSAlert) in scope, and the
+ * handler to be emitted at the top level of the script. When there are no
+ * ancestor pids/names (headless / can't read the process tree) it's a no-op: the
+ * dialog just blocks as before.
+ *
+ * @param {{ pids: number[], names: string[] }} host
+ * @returns {{ enabled: boolean, globals: string, arm: string, disarm: string, handler: string }}
+ */
+function macAutoDismiss(host) {
+  const pids = host?.pids ?? []
+  const names = host?.names ?? []
+  if (!pids.length && !names.length) {
+    return { enabled: false, globals: '', arm: '', disarm: '', handler: '' }
+  }
+  const pidList  = pids.join(', ')
+  const nameList = names.map(n => `"${asLiteral(n)}"`).join(', ')
+  return {
+    enabled: true,
+    globals: 'global _knHostPids, _knHostNames',
+    arm: `set _knHostPids to {${pidList}}
+set _knHostNames to {${nameList}}
+set _knTimer to (theApp's NSTimer's timerWithTimeInterval:0.3 target:me selector:"knAutoDismiss:" userInfo:(missing value) repeats:true)
+(theApp's NSRunLoop's currentRunLoop's addTimer:_knTimer forMode:(theApp's NSModalPanelRunLoopMode))`,
+    disarm: `(_knTimer's invalidate())`,
+    handler: `
+on knAutoDismiss:sender
+  global _knHostPids, _knHostNames
+  set fa to (current application's NSWorkspace's sharedWorkspace's frontmostApplication)
+  if fa is missing value then return
+  set _hit to false
+  set fpid to ((fa's processIdentifier) as integer)
+  if _knHostPids contains fpid then set _hit to true
+  if not _hit then
+    set fname to ""
+    try
+      set fname to (fa's localizedName as text)
+    end try
+    if fname is not "" then
+      repeat with nm in _knHostNames
+        set nmS to (nm as text)
+        if (fname contains nmS) or (nmS contains fname) then
+          set _hit to true
+          exit repeat
+        end if
+      end repeat
+    end if
+  end if
+  if _hit then (current application's NSApplication's sharedApplication()'s abortModal())
+end knAutoDismiss:`,
+  }
+}
+
+/**
+ * Build the {@link macAutoDismiss} host descriptor (pids + app-name tokens) from
+ * our ancestor process snapshot, using the injected `run` so it stays testable.
+ * @param {typeof spawnSync} run
+ * @returns {{ pids: number[], names: string[] }}
+ */
+function hostForAutoDismiss(run) {
+  const procs = getAncestorProcs({ run })
+  return { pids: procs.map(p => p.pid), names: hostAppNames(procs) }
+}
+
 // ──────────────────────────────────────────────────────────
 // Confirm dialog: Allow / Allow-All / Deny
 // Result is one of:
@@ -119,7 +205,7 @@ function macSoundShell() {
  *   timeout?:       number,
  * }} opts
  * @param {{ run?: typeof spawnSync, platform?: import('./platform.mjs').PlatformConfig }} [deps]
- * @returns {{ result: 'allow' | 'allow-all' | 'deny' | 'unavailable', meta: Record<string, unknown> }}
+ * @returns {{ result: 'allow' | 'allow-all' | 'deny' | 'refocus' | 'unavailable', meta: Record<string, unknown> }}
  */
 export function showDialog(opts, deps = {}) {
   const run = deps.run ?? spawnSync
@@ -143,58 +229,78 @@ export function showDialog(opts, deps = {}) {
   }
 }
 
-/** macOS — AppleScript `display dialog`. @returns {{result: string, meta: object}} */
+/**
+ * macOS — an NSAlert with Yes / (Allow-All) / No buttons. NSAlert (rather than
+ * plain `display dialog`) so the modal can auto-dismiss itself via a timer when
+ * the host app returns to the foreground.
+ *
+ * NSAlert lays buttons out right-to-left in add order, so we add the default
+ * (Allow) first — it lands rightmost and responds to Return — then Allow-All,
+ * then Deny (leftmost). Buttons map to NSModalResponse codes by add order
+ * (First=1000, Second=1001, …). Deny is also wired to Escape for parity with the
+ * old `cancel button`. Auto-dismiss returns NSModalResponseAbort (-1000).
+ * @returns {{result: string, meta: object}}
+ */
 function showDialogOsascript(o, run, bin) {
-  // Buttons render left-to-right; rightmost = default.
-  const buttons = o.allowAllLabel
-    ? [o.denyLabel, truncateLabel(o.allowAllLabel, 40), o.allowLabel]
-    : [o.denyLabel, o.allowLabel]
+  // Add order → response code: allow=1000, then allow-all, then deny.
+  const allowRc    = 1000
+  const allowAllRc = o.allowAllLabel ? 1001 : null
+  const denyRc     = o.allowAllLabel ? 1002 : 1001
 
-  // Build the script from escaped literals, but compare against the *raw* labels
-  // below — osascript returns the displayed (unescaped) button text.
-  const btnScript   = buttons.map(b => `"${asLiteral(b)}"`).join(', ')
-  const defaultBtn  = buttons.at(-1)
-  const cancelBtn   = buttons[0]
-
-  // Body via temp file to sidestep AppleScript quote-escaping.
   const tmp = writeTempFile(o.body)
   if (!tmp) return { result: 'unavailable', meta: { reason: 'tmpfile-write-failed' } }
 
+  const ad = macAutoDismiss(hostForAutoDismiss(run))
+  const allowAllBtn = o.allowAllLabel
+    ? `(a's addButtonWithTitle:"${asLiteral(truncateLabel(o.allowAllLabel, 40))}")`
+    : ''
+
   const script = `
-${macSoundShell()}
-set f to open for access POSIX file "${asLiteral(tmp.file)}"
-set msg to read f as «class utf8»
-close access f
-set theResult to display dialog msg ¬
-  buttons {${btnScript}} ¬
-  default button "${asLiteral(defaultBtn)}" ¬
-  cancel button "${asLiteral(cancelBtn)}" ¬
-  with icon caution ¬
-  with title "${asLiteral(o.title)}"
-return button returned of theResult
+use framework "Foundation"
+use framework "AppKit"
+${ad.globals}
+set theApp to current application
+set bodyText to ((theApp's NSString's stringWithContentsOfFile:"${asLiteral(tmp.file)}" encoding:(theApp's NSUTF8StringEncoding) |error|:(missing value)) as text)
+set a to theApp's NSAlert's alloc()'s init()
+a's setMessageText:"${asLiteral(o.title)}"
+a's setInformativeText:bodyText
+(a's addButtonWithTitle:"${asLiteral(o.allowLabel)}")
+${allowAllBtn}
+set denyBtn to (a's addButtonWithTitle:"${asLiteral(o.denyLabel)}")
+(denyBtn's setKeyEquivalent:(character id 27))
+${macSoundObjC()}
+theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+${ad.arm}
+set btn to a's runModal()
+${ad.disarm}
+return (btn as text)
+${ad.handler}
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
   tmp.cleanup()
 
+  const rawOut = (result.stdout || '').trim()
+  const rc = parseInt(rawOut, 10)
   const meta = {
     tool: 'osascript',
     status: result.status,
     signal: result.signal,
-    stdout: (result.stdout || '').trim(),
+    rc: Number.isNaN(rc) ? null : rc,
+    stdout: rawOut,
     stderr: (result.stderr || '').trim(),
-    defaultBtn,
-    cancelBtn,
+    autoDismiss: ad.enabled,
   }
 
   if (spawnFailed(result)) return { result: 'unavailable', meta: { ...meta, reason: 'osascript-unavailable' } }
-  // Ran but errored (e.g. user hit the cancel button / Esc) → an explicit deny.
+  // Ran but errored → treat as a deny (matches the old cancel-button behavior).
   if (result.status !== 0) return { result: 'deny', meta: { ...meta, reason: 'cancelled' } }
 
-  const clicked = (result.stdout || '').trim()
-  if (clicked === defaultBtn) return { result: 'allow', meta: { ...meta, clicked } }
-  if (o.allowAllLabel && clicked === buttons.at(-2)) return { result: 'allow-all', meta: { ...meta, clicked } }
-  return { result: 'deny', meta: { ...meta, clicked, reason: 'non-default-button' } }
+  if (rc === MAC_ABORT_RC) return { result: 'refocus', meta: { ...meta, reason: 'host-refocused' } }
+  if (rc === allowRc) return { result: 'allow', meta }
+  if (allowAllRc !== null && rc === allowAllRc) return { result: 'allow-all', meta }
+  if (rc === denyRc) return { result: 'deny', meta }
+  return { result: 'deny', meta: { ...meta, reason: 'unknown-button' } }
 }
 
 /** Linux/GNOME — zenity `--question`. */
@@ -303,25 +409,48 @@ function showOptionsOsascript(o, run, bin) {
     .map(label => `(a's addButtonWithTitle:"${asLiteral(truncateLabel(label, 60))}")`)
     .join('\n')
   const openIdx = o.options.length // add-order index of the Open button
+  const ad = macAutoDismiss(hostForAutoDismiss(run))
 
+  // The body goes into a read-only, scrollable NSTextView accessory instead of
+  // `setInformativeText:`. Informative text has no scroll, so a long message
+  // stretches the alert until the buttons are pushed off-screen and become
+  // unclickable. A fixed-height scroll view keeps the alert bounded no matter
+  // how long the body is.
+  //
   // Read the body via NSString, not StandardAdditions `read (POSIX file …)`:
   // once `use framework "Foundation"` is active, that form throws -1700 ("Can't
   // make current application into type file") and aborts the dialog.
   const script = `
 use framework "Foundation"
 use framework "AppKit"
+${ad.globals}
 set theApp to current application
 set bodyText to ((theApp's NSString's stringWithContentsOfFile:"${asLiteral(bodyTmp.file)}" encoding:(theApp's NSUTF8StringEncoding) |error|:(missing value)) as text)
 set a to theApp's NSAlert's alloc()'s init()
 a's setMessageText:"${heading}"
-a's setInformativeText:bodyText
+set svW to 480
+set svH to 260
+set sv to theApp's NSScrollView's alloc()'s initWithFrame:(theApp's NSMakeRect(0, 0, svW, svH))
+sv's setHasVerticalScroller:true
+sv's setBorderType:(theApp's NSBezelBorder)
+set tv to theApp's NSTextView's alloc()'s initWithFrame:(theApp's NSMakeRect(0, 0, svW, svH))
+tv's setString:bodyText
+tv's setFont:(theApp's NSFont's systemFontOfSize:13)
+tv's setRichText:false
+tv's setEditable:false
+tv's setDrawsBackground:false
+sv's setDocumentView:tv
+a's setAccessoryView:sv
 ${optButtons}
 (a's addButtonWithTitle:"${asLiteral(o.openLabel)}")
 (a's addButtonWithTitle:"${asLiteral(o.dismissLabel)}")
 ${macSoundObjC()}
 theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+${ad.arm}
 set btn to a's runModal()
+${ad.disarm}
 return (btn as text)
+${ad.handler}
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
@@ -335,10 +464,15 @@ return (btn as text)
     rc: Number.isNaN(rc) ? null : rc,
     stdout: rawOut,
     stderr: (result.stderr || '').trim(),
+    autoDismiss: ad.enabled,
   }
 
   if (spawnFailed(result)) return { result: 'unavailable', meta: { ...meta, reason: 'osascript-unavailable' } }
   if (result.status !== 0) return { result: 'dismiss', meta: { ...meta, reason: 'cancelled' } }
+
+  // Host app came back to the front → auto-dismissed. Treat as a plain dismiss
+  // (close and let Claude proceed; the user is back at the window anyway).
+  if (rc === MAC_ABORT_RC) return { result: 'dismiss', meta: { ...meta, reason: 'host-refocused' } }
 
   const idx = rc - 1000 // 0-based button index, in add order
   if (idx >= 0 && idx < o.options.length) return { result: 'option', index: idx, label: o.options[idx], meta }
@@ -401,10 +535,13 @@ function showInputOsascript(o, run, bin) {
   const tmp = writeTempFile(o.body)
   if (!tmp) return null
 
+  const ad = macAutoDismiss(hostForAutoDismiss(run))
+
   const script = `
 use framework "Foundation"
 use framework "AppKit"
 use scripting additions
+${ad.globals}
 set bodyText to (read (POSIX file "${asLiteral(tmp.file)}") as «class utf8»)
 set theApp to current application
 set a to theApp's NSAlert's alloc()'s init()
@@ -425,12 +562,15 @@ a's setAccessoryView:sv
 a's window's setInitialFirstResponder:tv
 ${macSoundObjC()}
 theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+${ad.arm}
 set btn to a's runModal()
+${ad.disarm}
 if btn is (theApp's NSAlertFirstButtonReturn) then
   return (tv's string() as text)
 else
   return "${MAC_CANCEL_SENTINEL}"
 end if
+${ad.handler}
 `
 
   const result = run(bin, ['-e', script], { encoding: 'utf8', timeout: o.timeout })
@@ -601,10 +741,13 @@ function showChoiceOsascript(o, run, bin) {
   const tmp = writeTempFile(o.body)
   if (!tmp) return { result: 'unavailable', selected: [], meta: { reason: 'tmpfile-write-failed' } }
 
+  const ad = macAutoDismiss(hostForAutoDismiss(run))
+
   const script = `
 use framework "Foundation"
 use framework "AppKit"
 global btns
+${ad.globals}
 set theApp to current application
 set bodyText to ((theApp's NSString's stringWithContentsOfFile:"${asLiteral(tmp.file)}" encoding:(theApp's NSUTF8StringEncoding) |error|:(missing value)) as text)
 set optTitles to {${titlesList}}
@@ -643,7 +786,9 @@ a's setAccessoryView:sv
 (a's addButtonWithTitle:"${safeDismiss}")
 ${macSoundObjC()}
 theApp's NSApplication's sharedApplication()'s activateIgnoringOtherApps:true
+${ad.arm}
 set btn to a's runModal()
+${ad.disarm}
 if btn is not (theApp's NSAlertFirstButtonReturn) then
   return "${MAC_CANCEL_SENTINEL}"
 end if
@@ -653,6 +798,7 @@ repeat with b in btns
 end repeat
 set AppleScript's text item delimiters to linefeed
 return (chosen as text)
+${ad.handler}
 
 on radioPicked:sender
   global btns

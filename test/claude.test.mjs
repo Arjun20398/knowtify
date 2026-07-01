@@ -103,6 +103,10 @@ test('handlePermissionRequest: no GUI (unavailable) → null (defers, never deni
   const out = await handlePermissionRequest(baseInput, { isHostAppFrontmost: () => false, showDialog: () => ({ result: 'unavailable', meta: {} }) })
   assert.equal(out, null)
 })
+test('handlePermissionRequest: refocus (dialog auto-dismissed) → null (defers, never denies)', async () => {
+  const out = await handlePermissionRequest(baseInput, { isHostAppFrontmost: () => false, showDialog: () => ({ result: 'refocus', meta: {} }) })
+  assert.equal(out, null)
+})
 test('handlePermissionRequest: notify mode → banner + null (no dialog, defers)', async () => {
   let note
   const out = await handlePermissionRequest(baseInput, {
@@ -225,8 +229,13 @@ test('collectAnswers: Other → null (defers to Claude window)', () => {
 // ── stop: pure ──
 for (const m of ['What now?', 'Should I proceed?', 'a\nb\nWhich do you prefer', 'Use Redis or memory. Let me know.'])
   test(`looksLikeQuestion true: ${JSON.stringify(m.slice(0, 30))}`, () => assert.equal(looksLikeQuestion(m), true))
-for (const m of ['Done.', 'I finished the task.', '', 'Tests pass and code shipped.'])
-  test(`looksLikeQuestion false: ${JSON.stringify(m.slice(0, 30))}`, () => assert.equal(looksLikeQuestion(m), false))
+for (const m of [
+  'Done.', 'I finished the task.', '', 'Tests pass and code shipped.',
+  // Relative-pronoun "which" in a declarative sentence must NOT read as a question.
+  'The main heart stops beating when the octopus swims, which is why they prefer crawling.',
+  'I refactored the parser, which means the old tests still pass.',
+])
+  test(`looksLikeQuestion false: ${JSON.stringify(m.slice(0, 40))}`, () => assert.equal(looksLikeQuestion(m), false))
 
 test('readLastAssistantMessage: last assistant text, skips later user + tool-only', () => {
   const lines = [

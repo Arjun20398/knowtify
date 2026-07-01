@@ -90,7 +90,10 @@ export function looksLikeQuestion(message) {
   // Keyword fallback for questions phrased without a '?'. Deliberately narrow —
   // weak words like "continue"/"proceed"/"approach" fire on completion messages
   // ("I'll continue…", "this approach works") and caused false-positive dialogs.
-  const keywords = /\b(which|should i|do you want|would you like|let me know|pick one)\b/i
+  // "which" is only interrogative when it leads into a choice ("which one/of/
+  // option/do you/would you/should i…"); the bare relative pronoun ("…which is
+  // why", "…which means") is declarative and must NOT count as a question.
+  const keywords = /\b(which (one|of|option|approach|do you|would you|should i)|should i|do you want|would you like|let me know|pick one)\b/i
   if (keywords.test(tail)) return true
 
   return false

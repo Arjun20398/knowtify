@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { showDialog, showInputDialog, showChoiceDialog, showOptionsDialog, showNotification } from '../core/dialog.mjs'
-import { isHostAppFrontmost, focusHostApp } from '../core/focus.mjs'
+import { isHostAppFrontmost, focusHostApp, getAncestorProcs, hostAppNames } from '../core/focus.mjs'
 
 const osa = { tool: 'osascript', path: '/usr/bin/osascript' }
 const MAC = { os: 'macos', dialog: osa, notify: osa, focus: osa }
@@ -24,15 +24,31 @@ test('showDialog: spawn failure → unavailable', () => {
   assert.equal(r.result, 'unavailable')
 })
 
-test('showDialog osascript: default button → allow', () => {
-  // buttons render [No, Allow All, Yes]; default (rightmost) = "Yes"
-  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: 'Yes' }) })
+test('showDialog osascript: default button (rc 1000) → allow', () => {
+  // NSAlert buttons are added Yes(1000), Allow All(1001), No(1002).
+  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: '1000' }) })
   assert.equal(r.result, 'allow')
 })
 
-test('showDialog osascript: allow-all button', () => {
-  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: 'Allow All' }) })
+test('showDialog osascript: allow-all button (rc 1001)', () => {
+  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: '1001' }) })
   assert.equal(r.result, 'allow-all')
+})
+
+test('showDialog osascript: deny button (rc 1002) → deny', () => {
+  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: '1002' }) })
+  assert.equal(r.result, 'deny')
+})
+
+test('showDialog osascript: without allow-all, deny is rc 1001', () => {
+  const noAll = { title: 'T', body: 'B', allowLabel: 'Yes', denyLabel: 'No' }
+  assert.equal(showDialog(noAll, { platform: MAC, run: () => ok({ stdout: '1000' }) }).result, 'allow')
+  assert.equal(showDialog(noAll, { platform: MAC, run: () => ok({ stdout: '1001' }) }).result, 'deny')
+})
+
+test('showDialog osascript: auto-dismiss (abort rc -1000) → refocus', () => {
+  const r = showDialog(opts, { platform: MAC, run: () => ok({ stdout: '-1000' }) })
+  assert.equal(r.result, 'refocus')
 })
 
 test('showDialog osascript: cancel (non-zero, ran) → deny', () => {
@@ -43,17 +59,40 @@ test('showDialog osascript: cancel (non-zero, ran) → deny', () => {
 test('showDialog osascript: escapes quotes and backslashes in title/labels', () => {
   let script
   const nasty = { title: 'proj "x"\\', body: 'B', allowLabel: 'Yes', denyLabel: 'No' }
-  showDialog(nasty, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'Yes' }) } })
+  showDialog(nasty, { platform: MAC, run: (bin, args) => { if (bin !== 'ps') script = args[1]; return ok({ stdout: '1000' }) } })
   // The trailing backslash and embedded quotes must be escaped so they can't
   // terminate the AppleScript string literal early.
-  assert.match(script, /with title "proj \\"x\\"\\\\"/)
+  assert.match(script, /setMessageText:"proj \\"x\\"\\\\"/)
 })
 
-test('showDialog osascript: a quote in a button label still matches the raw click', () => {
-  // osascript returns the displayed (unescaped) label; comparison uses raw text.
-  const quoted = { title: 'T', body: 'B', allowLabel: 'Say "hi"', denyLabel: 'No' }
-  const r = showDialog(quoted, { platform: MAC, run: () => ok({ stdout: 'Say "hi"' }) })
+test('showDialog osascript: arms an auto-dismiss timer with host pids + app names', () => {
+  let script
+  const ppid = process.ppid
+  const run = (bin, args) => {
+    // parent = a shell (filtered out of names), grandparent = the terminal app.
+    if (bin === 'ps') return { status: 0, stdout: `${ppid} 4242 -zsh\n4242 1 /Applications/iTerm.app/Contents/MacOS/iTerm2\n`, stderr: '' }
+    script = args[1]
+    return ok({ stdout: '1000' })
+  }
+  const r = showDialog(opts, { platform: MAC, run })
   assert.equal(r.result, 'allow')
+  assert.match(script, /knAutoDismiss/)
+  assert.match(script, /addTimer:_knTimer forMode:/)
+  assert.match(script, new RegExp(`set _knHostPids to \\{${ppid}, 4242\\}`))
+  // "zsh" is filtered as a shell; the terminal app name survives.
+  assert.match(script, /set _knHostNames to \{"iterm2"\}/)
+})
+
+test('showDialog osascript: no host pids → no timer wiring (plain blocking modal)', () => {
+  let script
+  // ps unavailable (throws) → no ancestor pids → auto-dismiss disabled.
+  const run = (bin, args) => {
+    if (bin === 'ps') throw new Error('no ps')
+    script = args[1]
+    return ok({ stdout: '1000' })
+  }
+  showDialog(opts, { platform: MAC, run })
+  assert.doesNotMatch(script, /knAutoDismiss/)
 })
 
 test('showChoiceDialog osascript: escapes options in the list literal', () => {
@@ -141,6 +180,12 @@ test('showOptionsDialog osascript: last rc → dismiss', () => {
 test('showOptionsDialog osascript: cancel (non-zero, ran) → dismiss', () => {
   const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ({ status: 1, signal: null, stdout: '', stderr: 'x' }) })
   assert.equal(r.result, 'dismiss')
+})
+
+test('showOptionsDialog osascript: auto-dismiss (abort rc -1000) → dismiss', () => {
+  const r = showOptionsDialog(optDlg, { platform: MAC, run: () => ok({ stdout: '-1000' }) })
+  assert.equal(r.result, 'dismiss')
+  assert.equal(r.meta.reason, 'host-refocused')
 })
 
 test('showOptionsDialog osascript: spawn failure → unavailable', () => {
@@ -256,10 +301,10 @@ test('showChoiceDialog osascript: reads checked labels (newline-joined stdout)',
 })
 
 // ── popup sound (macOS) ──
-test('showDialog osascript: plays a subtle popup sound (afplay)', () => {
+test('showDialog osascript: plays a subtle popup sound (NSSound)', () => {
   let script
-  showDialog(opts, { platform: MAC, run: (_b, args) => { script = args[1]; return ok({ stdout: 'Yes' }) } })
-  assert.match(script, /afplay -v 0\.25 .*Tink\.aiff/)
+  showDialog(opts, { platform: MAC, run: (bin, args) => { if (bin !== 'ps') script = args[1]; return ok({ stdout: '1000' }) } })
+  assert.match(script, /NSSound's soundNamed:"Tink"/)
 })
 test('showOptionsDialog osascript: plays a subtle popup sound (NSSound)', () => {
   let script
@@ -343,6 +388,41 @@ test('isHostAppFrontmost osascript: front app not an ancestor → false', () => 
     return { status: 1, stdout: '' }
   }
   assert.equal(isHostAppFrontmost({ platform: MAC, run }), false)
+})
+
+// ── getAncestorProcs ──
+test('getAncestorProcs: run throws → [] (never throws)', () => {
+  assert.deepEqual(getAncestorProcs({ run: () => { throw new Error('boom') } }), [])
+})
+
+test('getAncestorProcs: returns {pid, comm} pairs from the ps snapshot', () => {
+  const ppid = process.ppid
+  const run = (bin) => {
+    if (bin === 'ps') return { status: 0, stdout: `${ppid} 4242 -zsh\n4242 1 /Applications/iTerm.app/Contents/MacOS/iTerm2\n` }
+    return { status: 1, stdout: '' }
+  }
+  assert.deepEqual(getAncestorProcs({ run }), [
+    { pid: ppid, comm: '-zsh' },
+    { pid: 4242, comm: '/applications/iterm.app/contents/macos/iterm2' },
+  ])
+})
+
+// ── hostAppNames ──
+test('hostAppNames: keeps GUI app basenames, drops shells/interpreters/short', () => {
+  const procs = [
+    { pid: 1, comm: '-zsh' },
+    { pid: 2, comm: '/usr/local/bin/node' },
+    { pid: 3, comm: '/applications/iterm.app/contents/macos/iterm2' },
+    { pid: 4, comm: '/applications/cursor.app/contents/frameworks/cursor helper (renderer)' },
+    { pid: 5, comm: 'sh' },
+    { pid: 6, comm: '' },
+  ]
+  assert.deepEqual(hostAppNames(procs), ['iterm2', 'cursor helper (renderer)'])
+})
+
+test('hostAppNames: dedupes and handles empty input', () => {
+  assert.deepEqual(hostAppNames([]), [])
+  assert.deepEqual(hostAppNames([{ pid: 1, comm: 'iterm2' }, { pid: 2, comm: 'iterm2' }]), ['iterm2'])
 })
 
 // ── focusHostApp ──

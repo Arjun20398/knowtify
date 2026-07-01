@@ -167,6 +167,10 @@ export async function handlePermissionRequest(input, deps = {}) {
   // rather than silently denying the tool.
   if (result === 'unavailable') return null
 
+  // The dialog auto-dismissed because you returned to the terminal/editor. Defer
+  // to Claude's in-terminal prompt — never treat a refocus as a deny.
+  if (result === 'refocus') return null
+
   const action = result === 'allow' ? 'yes' : result === 'allow-all' ? 'yes-all' : 'no'
   return buildHookOutput(prompt, action)
 }
